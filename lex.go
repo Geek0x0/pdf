@@ -20,7 +20,6 @@ import (
 //	string, a PDF string literal
 //	keyword, a PDF keyword
 //	name, a PDF name without the leading slash
-//
 type token interface{}
 
 // A name is a PDF name, without the leading slash.
@@ -225,7 +224,7 @@ func (b *buffer) readLiteralString() token {
 	tmp := b.tmp[:0]
 	depth := 1
 Loop:
-	for {
+	for !b.eof {
 		c := b.readByte()
 		switch c {
 		default:
@@ -419,6 +418,9 @@ func (b *buffer) readObject() object {
 			return b.readDict()
 		case "[":
 			return b.readArray()
+		case ">>":
+			// stop the object
+			return nil
 		}
 		b.errorf("unexpected keyword %q parsing object", kw)
 		return nil
@@ -480,8 +482,12 @@ func (b *buffer) readDict() object {
 		if tok == nil || tok == keyword(">>") {
 			break
 		}
+		if tok == io.EOF {
+			break
+		}
 		n, ok := tok.(name)
 		if !ok {
+			fmt.Printf("DEBUG: %T(%v)\n. Skip dict", tok, tok)
 			b.errorf("unexpected non-name key %T(%v) parsing dictionary", tok, tok)
 			continue
 		}

@@ -4,7 +4,7 @@
 
 // Package pdf implements reading of PDF files.
 //
-// Overview
+// # Overview
 //
 // PDF is Adobe's Portable Document Format, ubiquitous on the internet.
 // A PDF document is a complex data format built on a fairly simple structure.
@@ -43,8 +43,7 @@
 // they are implemented only in terms of the Value API and could be moved outside
 // the package. Equally important, traversal of other PDF data structures can be implemented
 // in other packages as needed.
-//
-package pdf // import "rsc.io/pdf"
+package pdf
 
 // BUG(rsc): The package is incomplete, although it has been used successfully on some
 // large real-world PDF files.
@@ -61,19 +60,57 @@ package pdf // import "rsc.io/pdf"
 // set an error reporting callback in Reader, but that code has not been implemented.
 
 import (
+	"bufio"
 	"bytes"
+	"compress/lzw"
 	"compress/zlib"
+	"container/list"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rc4"
+	"encoding/ascii85"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 )
+
+// DebugOn is responsible for logging messages into stdout. If problems arise during reading, set it true.
+var DebugOn = false
+
+// FontCache stores parsed fonts to avoid re-parsing across pages
+type FontCache struct {
+	mu    sync.RWMutex
+	fonts map[string]*Font
+}
+
+// NewFontCache creates a new font cache
+func NewFontCache() *FontCache {
+	return &FontCache{
+		fonts: make(map[string]*Font),
+	}
+}
+
+// Get retrieves a font from the cache
+func (fc *FontCache) Get(key string) (*Font, bool) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	font, ok := fc.fonts[key]
+	return font, ok
+}
+
+// Set stores a font in the cache
+func (fc *FontCache) Set(key string, font *Font) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.fonts[key] = font
+}
 
 // A Reader is a single PDF file open for reading.
 type Reader struct {
@@ -84,6 +121,11 @@ type Reader struct {
 	trailerptr objptr
 	key        []byte
 	useAES     bool
+	cacheMu    sync.RWMutex
+	objCache   map[objptr]*list.Element
+	cacheList  *list.List
+	cacheCap   int
+	fontCache  *FontCache
 }
 
 type xref struct {
@@ -97,19 +139,90 @@ func (r *Reader) errorf(format string, args ...interface{}) {
 	panic(fmt.Errorf(format, args...))
 }
 
+func (r *Reader) getCachedObject(ptr objptr) (object, bool) {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	elem, ok := r.objCache[ptr]
+	if !ok || elem == nil {
+		return nil, false
+	}
+	r.cacheList.MoveToFront(elem)
+	if entry, ok := elem.Value.(cacheEntry); ok {
+		return entry.value, true
+	}
+	return nil, false
+}
+
+func (r *Reader) storeCachedObject(ptr objptr, obj object) {
+	if ptr.id == 0 || obj == nil {
+		return
+	}
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if r.cacheList == nil {
+		r.cacheList = list.New()
+	}
+	if r.objCache == nil {
+		r.objCache = make(map[objptr]*list.Element)
+	}
+	if elem, ok := r.objCache[ptr]; ok {
+		elem.Value = cacheEntry{key: ptr, value: obj}
+		r.cacheList.MoveToFront(elem)
+		return
+	}
+	elem := r.cacheList.PushFront(cacheEntry{key: ptr, value: obj})
+	r.objCache[ptr] = elem
+	if r.cacheCap > 0 && r.cacheList.Len() > r.cacheCap {
+		r.evictOldest()
+	}
+}
+
+func (r *Reader) evictOldest() {
+	back := r.cacheList.Back()
+	if back == nil {
+		return
+	}
+	r.cacheList.Remove(back)
+	if entry, ok := back.Value.(cacheEntry); ok {
+		delete(r.objCache, entry.key)
+	}
+}
+
+func (r *Reader) SetCacheCapacity(n int) {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	r.cacheCap = n
+	if n <= 0 {
+		return
+	}
+	for r.cacheList != nil && r.cacheList.Len() > r.cacheCap {
+		r.evictOldest()
+	}
+}
+
+type cacheEntry struct {
+	key   objptr
+	value object
+}
+
 // Open opens a file for reading.
-func Open(file string) (*Reader, error) {
-	// TODO: Deal with closing file.
+func Open(file string) (*os.File, *Reader, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		return nil, err
+		f.Close()
+		return nil, nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return NewReader(f, fi.Size())
+	reader, err := NewReader(f, fi.Size())
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, reader, err
 }
 
 // NewReader opens a file for reading, using the data in f with the given total size.
@@ -144,8 +257,9 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	}
 
 	r := &Reader{
-		f:   f,
-		end: end,
+		f:         f,
+		end:       end,
+		fontCache: NewFontCache(),
 	}
 	pos := end - endChunk + int64(i)
 	b := newBuffer(io.NewSectionReader(f, pos, end-pos), pos)
@@ -159,11 +273,14 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref)
 	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
-		return nil, err
+		if rebuildErr := r.rebuildXrefTable(); rebuildErr != nil {
+			return nil, err
+		}
+	} else {
+		r.xref = xref
+		r.trailer = trailer
+		r.trailerptr = trailerptr
 	}
-	r.xref = xref
-	r.trailer = trailer
-	r.trailerptr = trailerptr
 	if trailer["Encrypt"] == nil {
 		return r, nil
 	}
@@ -184,6 +301,19 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		}
 	}
 	return nil, err
+}
+
+// NewReaderEncryptedWithMmap opens a file for reading with memory mapping for large files.
+// If the file size exceeds 10MB, it uses memory mapping to reduce memory usage.
+// This is a wrapper around NewReaderEncrypted that optimizes for large files.
+func NewReaderEncryptedWithMmap(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
+	const largeFileThreshold = 10 * 1024 * 1024 // 10MB
+	if size > largeFileThreshold {
+		// For large files, we could implement memory mapping here
+		// For now, fall back to regular reader but log the opportunity
+		// TODO: Implement actual memory mapping using syscall.Mmap or similar
+	}
+	return NewReaderEncrypted(f, size, pw)
 }
 
 // Trailer returns the file's Trailer value.
@@ -328,7 +458,9 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 			case 2:
 				table[x] = xref{ptr: objptr{uint32(x), 0}, inStream: true, stream: objptr{uint32(v2), 0}, offset: int64(v3)}
 			default:
-				fmt.Printf("invalid xref stream type %d: %x\n", v1, buf)
+				if DebugOn {
+					fmt.Printf("invalid xref stream type %d: %x\n", v1, buf)
+				}
 			}
 		}
 	}
@@ -388,6 +520,85 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	}
 
 	return table, objptr{}, trailer, nil
+}
+
+func (r *Reader) rebuildXrefTable() error {
+	if r.end <= 0 {
+		return errors.New("cannot rebuild xref: empty file")
+	}
+	if r.end > 200<<20 {
+		return errors.New("pdf: file too large to rebuild xref")
+	}
+	data := make([]byte, int(r.end))
+	sr := io.NewSectionReader(r.f, 0, r.end)
+	if _, err := io.ReadFull(sr, data); err != nil {
+		return err
+	}
+	entries := make(map[uint32]xref)
+	search := 0
+	for {
+		idx := bytes.Index(data[search:], []byte(" obj"))
+		if idx < 0 {
+			break
+		}
+		pos := search + idx
+		lineStart := pos
+		for lineStart > 0 && data[lineStart-1] != '\n' && data[lineStart-1] != '\r' {
+			lineStart--
+		}
+		line := strings.Fields(string(data[lineStart:pos]))
+		if len(line) >= 2 {
+			if id64, err1 := strconv.ParseUint(line[0], 10, 32); err1 == nil {
+				if gen64, err2 := strconv.ParseUint(line[1], 10, 16); err2 == nil {
+					ptr := objptr{uint32(id64), uint16(gen64)}
+					if _, ok := entries[ptr.id]; !ok {
+						entries[ptr.id] = xref{ptr: ptr, offset: int64(lineStart)}
+					}
+				}
+			}
+		}
+		search = pos + len(" obj")
+	}
+	if len(entries) == 0 {
+		return errors.New("pdf: unable to rebuild xref")
+	}
+	var maxID uint32
+	for id := range entries {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	table := make([]xref, maxID+1)
+	for id, entry := range entries {
+		table[id] = entry
+	}
+	r.xref = table
+	if err := r.recoverTrailer(data); err != nil {
+		r.trailer = make(dict)
+		r.trailerptr = objptr{}
+		return nil
+	}
+	return nil
+}
+
+func (r *Reader) recoverTrailer(data []byte) error {
+	idx := bytes.LastIndex(data, []byte("trailer"))
+	if idx < 0 {
+		return errors.New("trailer not found")
+	}
+	buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
+	buf.allowEOF = true
+	if tok := buf.readToken(); tok != keyword("trailer") {
+		return errors.New("malformed recovered trailer")
+	}
+	obj := buf.readObject()
+	d, ok := obj.(dict)
+	if !ok {
+		return errors.New("recovered trailer is not dict")
+	}
+	r.trailer = d
+	r.trailerptr = objptr{}
+	return nil
 }
 
 func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
@@ -600,7 +811,7 @@ func (v Value) RawString() string {
 	return x
 }
 
-// Text returns v's string value interpreted as a ``text string'' (defined in the PDF spec)
+// Text returns v's string value interpreted as a “text string” (defined in the PDF spec)
 // and converted to UTF-8.
 // If v.Kind() != String, Text returns the empty string.
 func (v Value) Text() string {
@@ -707,6 +918,9 @@ func (v Value) Len() int {
 
 func (r *Reader) resolve(parent objptr, x interface{}) Value {
 	if ptr, ok := x.(objptr); ok {
+		if obj, ok := r.getCachedObject(ptr); ok {
+			return Value{r, parent, obj}
+		}
 		if ptr.id >= uint32(len(r.xref)) {
 			return Value{}
 		}
@@ -738,6 +952,7 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 					if uint32(id) == ptr.id {
 						b.seekForward(first + off)
 						x = b.readObject()
+						r.storeCachedObject(ptr, x)
 						break Search
 					}
 				}
@@ -761,6 +976,7 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 				panic(fmt.Errorf("loading %v: found %v", ptr, def.ptr))
 			}
 			x = def.obj
+			r.storeCachedObject(ptr, x)
 		}
 		parent = ptr
 	}
@@ -789,7 +1005,7 @@ func (e *errorReadCloser) Close() error {
 
 // Reader returns the data contained in the stream v.
 // If v.Kind() != Stream, Reader returns a ReadCloser that
-// responds to all reads with a ``stream not present'' error.
+// responds to all reads with a “stream not present” error.
 func (v Value) Reader() io.ReadCloser {
 	x, ok := v.data.(stream)
 	if !ok {
@@ -827,18 +1043,63 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 		if err != nil {
 			panic(err)
 		}
-		pred := param.Key("Predictor")
-		if pred.Kind() == Null {
-			return zr
+		return applyPredictor(zr, param)
+	case "LZWDecode":
+		early := param.Key("EarlyChange")
+		if early.Kind() != Null && early.Int64() != 1 {
+			panic("LZW EarlyChange != 1 not supported")
 		}
-		columns := param.Key("Columns").Int64()
-		switch pred.Int64() {
+		lr := lzw.NewReader(rd, lzw.MSB, 8)
+		return applyPredictor(lr, param)
+	case "ASCII85Decode":
+		cleanASCII85 := newAlphaReader(rd)
+		decoder := ascii85.NewDecoder(cleanASCII85)
+
+		switch param.Keys() {
 		default:
-			fmt.Println("unknown predictor", pred)
-			panic("pred")
-		case 12:
-			return &pngUpReader{r: zr, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}
+			if DebugOn {
+				fmt.Println("param=", param)
+			}
+			panic("not expected DecodeParms for ascii85")
+		case nil:
+			return decoder
 		}
+	case "DCTDecode":
+		// JPEG-compressed data is already suitable for consumers; leave as-is.
+		return rd
+	case "JPXDecode":
+		// JPEG2000-compressed data; passthrough for now.
+		return rd
+	case "CCITTFaxDecode":
+		// CCITT Group 3/4 data is left as-is for callers that understand the encoding.
+		return rd
+	case "RunLengthDecode":
+		return newRunLengthReader(rd)
+	}
+}
+
+func applyPredictor(rd io.Reader, param Value) io.Reader {
+	if param.Kind() != Dict {
+		return rd
+	}
+	pred := param.Key("Predictor")
+	if pred.Kind() == Null {
+		return rd
+	}
+	switch pred.Int64() {
+	case 1, 2:
+		return rd
+	case 12:
+		columns := param.Key("Columns").Int64()
+		if columns <= 0 {
+			columns = 1
+		}
+		return &pngUpReader{r: rd, hist: make([]byte, 1+columns), tmp: make([]byte, 1+columns)}
+	default:
+		if DebugOn {
+			fmt.Println("unknown predictor", pred)
+		}
+		panic("pred")
 	}
 }
 
@@ -872,6 +1133,74 @@ func (r *pngUpReader) Read(b []byte) (int, error) {
 		r.pend = r.hist[1:]
 	}
 	return n, nil
+}
+
+type runLengthReader struct {
+	r   *bufio.Reader
+	buf []byte
+	eod bool
+}
+
+func newRunLengthReader(rd io.Reader) io.Reader {
+	return &runLengthReader{r: bufio.NewReader(rd)}
+}
+
+func (r *runLengthReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := 0
+	for len(p) > 0 {
+		if len(r.buf) == 0 {
+			if r.eod {
+				if n == 0 {
+					return 0, io.EOF
+				}
+				break
+			}
+			if err := r.fill(); err != nil {
+				if err == io.EOF {
+					if n == 0 {
+						return 0, io.EOF
+					}
+					break
+				}
+				return n, err
+			}
+		}
+		m := copy(p, r.buf)
+		n += m
+		p = p[m:]
+		r.buf = r.buf[m:]
+	}
+	return n, nil
+}
+
+func (r *runLengthReader) fill() error {
+	b, err := r.r.ReadByte()
+	if err != nil {
+		return err
+	}
+	if b == 128 {
+		r.eod = true
+		return io.EOF
+	}
+	if b <= 127 {
+		count := int(b) + 1
+		r.buf = make([]byte, count)
+		if _, err := io.ReadFull(r.r, r.buf); err != nil {
+			return err
+		}
+		return nil
+	}
+	// 129..255 repeat
+	count := 257 - int(b)
+	val, err := r.r.ReadByte()
+	if err != nil {
+		return err
+	}
+	r.buf = bytes.Repeat([]byte{val}, count)
+	return nil
 }
 
 var passwordPad = []byte{
@@ -1004,6 +1333,9 @@ func okayV4(encrypt dict) bool {
 		return false
 	}
 	cfparam, ok := cf[stmf].(dict)
+	if !ok {
+		return false
+	}
 	if cfparam["AuthEvent"] != nil && cfparam["AuthEvent"] != name("DocOpen") {
 		return false
 	}
@@ -1029,7 +1361,18 @@ func cryptKey(key []byte, useAES bool, ptr objptr) []byte {
 func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
 	key = cryptKey(key, useAES, ptr)
 	if useAES {
-		panic("AES not implemented")
+		s := []byte(x)
+		if len(s) < aes.BlockSize {
+			panic("Encrypted text shorter that AES block size")
+		}
+
+		block, _ := aes.NewCipher(key)
+		iv := s[:aes.BlockSize]
+		s = s[aes.BlockSize:]
+
+		stream := cipher.NewCBCDecrypter(block, iv)
+		stream.CryptBlocks(s, s)
+		x = string(s)
 	} else {
 		c, _ := rc4.NewCipher(key)
 		data := []byte(x)

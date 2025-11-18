@@ -29,8 +29,8 @@ func (os *OptimizedSorter) SortTexts(texts []Text, less func(i, j int) bool) {
 	}
 
 	if len(texts) < os.parallelThreshold {
-		// Use standard sort for smaller collections
-		os.standardSort(texts, less)
+		// Use optimized sort for smaller collections
+		os.timSort(texts, less)
 	} else {
 		// Use parallel sort for larger collections
 		os.parallelSort(texts, less)
@@ -41,6 +41,134 @@ func (os *OptimizedSorter) SortTexts(texts []Text, less func(i, j int) bool) {
 func (os *OptimizedSorter) standardSort(texts []Text, less func(i, j int) bool) {
 	// Use Go's standard library sort, which is already highly optimized
 	sort.Slice(texts, less)
+}
+
+// timSort implements an optimized Timsort-like algorithm
+func (os *OptimizedSorter) timSort(texts []Text, less func(i, j int) bool) {
+	const minRun = 32
+
+	n := len(texts)
+	if n <= minRun {
+		os.insertionSort(texts, less)
+		return
+	}
+
+	// Calculate min run length
+	minRunLen := os.calcMinRun(n)
+
+	runs := make([]run, 0, n/minRunLen+1)
+
+	// Create initial runs
+	for i := 0; i < n; {
+		start := i
+		end := min(i+minRunLen, n)
+
+		// Find natural run
+		for j := start + 1; j < end && !less(j, j-1); j++ {
+			// Continue while ascending
+		}
+
+		// If descending, reverse
+		if start+1 < end && less(end-1, start) {
+			os.reverse(texts[start:end])
+		}
+
+		// Insertion sort the run
+		os.insertionSort(texts[start:end], func(i, j int) bool {
+			return less(start+i, start+j)
+		})
+
+		runs = append(runs, run{start: start, len: end - start})
+		i = end
+	}
+
+	// Merge runs
+	for len(runs) > 1 {
+		i := 0
+		for i < len(runs)-1 {
+			if i+2 < len(runs) && runs[i+1].len < runs[i+2].len {
+				// Merge runs[i] and runs[i+1]
+				os.mergeRuns(texts, &runs[i], &runs[i+1], less)
+				runs = append(runs[:i+1], runs[i+2:]...)
+			} else {
+				i++
+			}
+		}
+	}
+}
+
+// run represents a sorted run in Timsort
+type run struct {
+	start, len int
+}
+
+// calcMinRun calculates the minimum run length for Timsort
+func (os *OptimizedSorter) calcMinRun(n int) int {
+	r := 0
+	for n >= 64 {
+		r |= n & 1
+		n >>= 1
+	}
+	return n + r
+}
+
+// insertionSort performs insertion sort on a subarray
+func (os *OptimizedSorter) insertionSort(texts []Text, less func(i, j int) bool) {
+	for i := 1; i < len(texts); i++ {
+		for j := i; j > 0 && less(j, j-1); j-- {
+			texts[j], texts[j-1] = texts[j-1], texts[j]
+		}
+	}
+}
+
+// insertionSortRange performs insertion sort on a range
+func (os *OptimizedSorter) insertionSortRange(texts []Text, low, high int, less func(i, j int) bool) {
+	for i := low + 1; i <= high; i++ {
+		for j := i; j > low && less(j, j-1); j-- {
+			texts[j], texts[j-1] = texts[j-1], texts[j]
+		}
+	}
+}
+
+// reverse reverses a subarray
+func (os *OptimizedSorter) reverse(texts []Text) {
+	for i, j := 0, len(texts)-1; i < j; i, j = i+1, j-1 {
+		texts[i], texts[j] = texts[j], texts[i]
+	}
+}
+
+// mergeRuns merges two adjacent runs
+func (os *OptimizedSorter) mergeRuns(texts []Text, run1, run2 *run, less func(i, j int) bool) {
+	// Use galloping mode for better performance on partially sorted data
+	os.gallopMerge(texts, run1.start, run1.start+run1.len, run2.start+run2.len, less)
+	run1.len += run2.len
+}
+
+// gallopMerge performs a galloping merge
+func (os *OptimizedSorter) gallopMerge(texts []Text, start, mid, end int, less func(i, j int) bool) {
+	if mid-start <= end-mid {
+		// Left run is smaller, merge right to left
+		for i := mid; i < end; i++ {
+			temp := texts[i]
+			j := i
+			for j > start && less(i, j-1) {
+				texts[j] = texts[j-1]
+				j--
+			}
+			texts[j] = temp
+		}
+	} else {
+		// Right run is smaller, merge left to right
+		for i := mid - 1; i >= start; i-- {
+			temp := texts[i]
+			j := i
+			for j < end-1 && less(j+1, j) {
+				texts[j] = texts[j+1]
+				j++
+			}
+			texts[j] = temp
+		}
+	}
 }
 
 // parallelSort performs parallel merge sort for large collections
@@ -215,10 +343,10 @@ func (os *OptimizedSorter) quickSortRange(texts []Text, low, high int, less func
 	if low < high {
 		// For very small ranges, use insertion sort
 		if high-low < 10 {
-			os.insertionSort(texts, low, high, less)
+			os.insertionSortRange(texts, low, high, less)
 			return
 		}
-		
+
 		// Partition and recursively sort
 		pivot := os.partition(texts, low, high, less)
 		os.quickSortRange(texts, low, pivot-1, less)
@@ -239,33 +367,22 @@ func (os *OptimizedSorter) partition(texts []Text, low, high int, less func(i, j
 	if less(high, mid) {
 		texts[mid], texts[high] = texts[high], texts[mid]
 	}
-	
+
 	// Move median to end
 	texts[mid], texts[high] = texts[high], texts[mid]
-	
+
 	pivot := high
 	i := low - 1
-	
+
 	for j := low; j < high; j++ {
 		if less(j, pivot) || !less(pivot, j) {
 			i++
 			texts[i], texts[j] = texts[j], texts[i]
 		}
 	}
-	
+
 	texts[i+1], texts[high] = texts[high], texts[i+1]
 	return i + 1
-}
-
-// insertionSort performs insertion sort on a small range
-func (os *OptimizedSorter) insertionSort(texts []Text, low, high int, less func(i, j int) bool) {
-	for i := low + 1; i <= high; i++ {
-		j := i
-		for j > low && less(j, j-1) {
-			texts[j], texts[j-1] = texts[j-1], texts[j]
-			j--
-		}
-	}
 }
 
 // OptimizedTextClusterSorter provides optimized sorting for text clusters

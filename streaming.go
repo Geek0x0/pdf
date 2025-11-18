@@ -7,25 +7,29 @@ package pdf
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"sync"
 )
 
 // StreamProcessor handles streaming processing of PDF content to minimize memory usage
 type StreamProcessor struct {
-	chunkSize    int           // Size of processing chunks
-	bufferSize   int           // Size of internal buffers
-	maxMemory    int64         // Maximum memory to use
-	currentUsage int64         // Current memory usage
-	mu           sync.Mutex    // Mutex for memory tracking
+	chunkSize    int        // Size of processing chunks
+	bufferSize   int        // Size of internal buffers
+	maxMemory    int64      // Maximum memory to use
+	currentUsage int64      // Current memory usage
+	mu           sync.Mutex // Mutex for memory tracking
 	ctx          context.Context
 	cancel       context.CancelFunc
 }
 
+var ErrMemoryLimitExceeded = errors.New("pdf: stream processor memory limit exceeded")
+
 // NewStreamProcessor creates a new streaming processor
 func NewStreamProcessor(chunkSize, bufferSize int, maxMemory int64) *StreamProcessor {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &StreamProcessor{
 		chunkSize:  chunkSize,
 		bufferSize: bufferSize,
@@ -35,9 +39,37 @@ func NewStreamProcessor(chunkSize, bufferSize int, maxMemory int64) *StreamProce
 	}
 }
 
+func (sp *StreamProcessor) tryReserveMemory(n int64) bool {
+	if sp == nil || sp.maxMemory <= 0 || n <= 0 {
+		return true
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.currentUsage+n > sp.maxMemory {
+		return false
+	}
+	sp.currentUsage += n
+	return true
+}
+
+func (sp *StreamProcessor) releaseMemory(n int64) {
+	if sp == nil || sp.maxMemory <= 0 || n <= 0 {
+		return
+	}
+	sp.mu.Lock()
+	sp.currentUsage -= n
+	if sp.currentUsage < 0 {
+		sp.currentUsage = 0
+	}
+	sp.mu.Unlock()
+}
+
 // Close releases resources used by the stream processor
 func (sp *StreamProcessor) Close() {
 	sp.cancel()
+	sp.mu.Lock()
+	sp.currentUsage = 0
+	sp.mu.Unlock()
 }
 
 // TextStream represents a stream of text with metadata
@@ -55,7 +87,7 @@ type TextStream struct {
 // ProcessTextStream processes text in a streaming fashion
 func (sp *StreamProcessor) ProcessTextStream(reader *Reader, handler func(TextStream) error) error {
 	totalPages := reader.NumPage()
-	
+
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
 		select {
 		case <-sp.ctx.Done():
@@ -73,6 +105,11 @@ func (sp *StreamProcessor) ProcessTextStream(reader *Reader, handler func(TextSt
 			default:
 			}
 
+			memCost := estimateTextMemory(text)
+			if !sp.tryReserveMemory(memCost) {
+				return ErrMemoryLimitExceeded
+			}
+
 			textStream := TextStream{
 				Text:       text.S,
 				PageNum:    pageNum,
@@ -86,8 +123,10 @@ func (sp *StreamProcessor) ProcessTextStream(reader *Reader, handler func(TextSt
 			}
 
 			if err := handler(textStream); err != nil {
+				sp.releaseMemory(memCost)
 				return err
 			}
+			sp.releaseMemory(memCost)
 		}
 	}
 
@@ -106,7 +145,7 @@ type TextBlockStream struct {
 // ProcessTextBlockStream processes text blocks in a streaming fashion
 func (sp *StreamProcessor) ProcessTextBlockStream(reader *Reader, handler func(TextBlockStream) error) error {
 	totalPages := reader.NumPage()
-	
+
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
 		select {
 		case <-sp.ctx.Done():
@@ -127,24 +166,32 @@ func (sp *StreamProcessor) ProcessTextBlockStream(reader *Reader, handler func(T
 			default:
 			}
 
+			blockCopy := &TextBlock{
+				Texts:       block.Content,
+				MinX:        block.Bounds.Min.X,
+				MaxX:        block.Bounds.Max.X,
+				MinY:        block.Bounds.Min.Y,
+				MaxY:        block.Bounds.Max.Y,
+				AvgFontSize: calculateAvgFontSize(block.Content),
+			}
 			blockStream := TextBlockStream{
-				Block: &TextBlock{
-					Texts:       block.Content,
-					MinX:        block.Bounds.Min.X,
-					MaxX:        block.Bounds.Max.X,
-					MinY:        block.Bounds.Min.Y,
-					MaxY:        block.Bounds.Max.Y,
-					AvgFontSize: calculateAvgFontSize(block.Content),
-				},
+				Block:   blockCopy,
 				PageNum: pageNum,
 				Type:    block.Type,
 				Level:   block.Level,
 				Text:    block.Text,
 			}
 
+			memCost := estimateBlockMemory(blockCopy)
+			if !sp.tryReserveMemory(memCost) {
+				return ErrMemoryLimitExceeded
+			}
+
 			if err := handler(blockStream); err != nil {
+				sp.releaseMemory(memCost)
 				return err
 			}
+			sp.releaseMemory(memCost)
 		}
 	}
 
@@ -166,16 +213,16 @@ func calculateAvgFontSize(texts []Text) float64 {
 
 // PageStream represents a stream of pages
 type PageStream struct {
-	Page    Page
-	PageNum int
-	HasText bool
+	Page      Page
+	PageNum   int
+	HasText   bool
 	TextCount int
 }
 
 // ProcessPageStream processes pages in a streaming fashion
 func (sp *StreamProcessor) ProcessPageStream(reader *Reader, handler func(PageStream) error) error {
 	totalPages := reader.NumPage()
-	
+
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
 		select {
 		case <-sp.ctx.Done():
@@ -193,9 +240,16 @@ func (sp *StreamProcessor) ProcessPageStream(reader *Reader, handler func(PageSt
 			TextCount: len(content.Text),
 		}
 
+		memCost := estimatePageMemory(len(content.Text))
+		if !sp.tryReserveMemory(memCost) {
+			return ErrMemoryLimitExceeded
+		}
+
 		if err := handler(pageStream); err != nil {
+			sp.releaseMemory(memCost)
 			return err
 		}
+		sp.releaseMemory(memCost)
 	}
 
 	return nil
@@ -242,14 +296,72 @@ func (mee *MemoryEfficientExtractor) ExtractTextStream(reader *Reader) (<-chan T
 }
 
 // ExtractTextToWriter extracts text directly to an io.Writer to minimize memory usage
-func (mee *MemoryEfficientExtractor) ExtractTextToWriter(reader *Reader, writer io.Writer) error {
-	// Create a buffered writer for better performance
+func (mee *MemoryEfficientExtractor) ExtractTextToWriter(reader *Reader, writer io.Writer) (err error) {
 	bufWriter := bufio.NewWriterSize(writer, mee.processor.bufferSize)
-	defer bufWriter.Flush()
 
-	// Process by pages to avoid loading all text into memory
+	chunkThreshold := mee.processor.chunkSize
+	if chunkThreshold <= 0 {
+		chunkThreshold = mee.processor.bufferSize
+	}
+	if chunkThreshold <= 0 {
+		chunkThreshold = 4096
+	}
+	if mee.processor.maxMemory > 0 && int64(chunkThreshold) > mee.processor.maxMemory {
+		chunkThreshold = int(mee.processor.maxMemory)
+	}
+
+	var chunkBuilder strings.Builder
+	var chunkReserved int64
+
+	growReservation := func() error {
+		additional := int64(chunkBuilder.Len()) - chunkReserved
+		if additional <= 0 {
+			return nil
+		}
+		if !mee.processor.tryReserveMemory(additional) {
+			return ErrMemoryLimitExceeded
+		}
+		chunkReserved += additional
+		return nil
+	}
+
+	flushChunk := func() error {
+		if chunkBuilder.Len() == 0 {
+			return nil
+		}
+		if _, err := bufWriter.WriteString(chunkBuilder.String()); err != nil {
+			chunkBuilder.Reset()
+			if chunkReserved > 0 {
+				mee.processor.releaseMemory(chunkReserved)
+				chunkReserved = 0
+			}
+			return err
+		}
+		chunkBuilder.Reset()
+		if chunkReserved > 0 {
+			mee.processor.releaseMemory(chunkReserved)
+			chunkReserved = 0
+		}
+		return nil
+	}
+
+	defer func() {
+		if flushErr := flushChunk(); err == nil {
+			err = flushErr
+		}
+		if chunkReserved > 0 {
+			mee.processor.releaseMemory(chunkReserved)
+			chunkReserved = 0
+		}
+		if flushErr := bufWriter.Flush(); err == nil {
+			err = flushErr
+		} else {
+			// Ensure buffer is flushed even if error is already set
+			bufWriter.Flush()
+		}
+	}()
+
 	totalPages := reader.NumPage()
-	
 	for pageNum := 1; pageNum <= totalPages; pageNum++ {
 		select {
 		case <-mee.processor.ctx.Done():
@@ -259,10 +371,8 @@ func (mee *MemoryEfficientExtractor) ExtractTextToWriter(reader *Reader, writer 
 
 		page := reader.Page(pageNum)
 		content := page.Content()
-
-		// Group texts by lines and write them incrementally
 		lines := groupTextsByLines(content.Text)
-		
+
 		for _, line := range lines {
 			select {
 			case <-mee.processor.ctx.Done():
@@ -271,11 +381,20 @@ func (mee *MemoryEfficientExtractor) ExtractTextToWriter(reader *Reader, writer 
 			}
 
 			lineText := buildLineText(line)
-			if _, err := bufWriter.WriteString(lineText); err != nil {
+			if lineText == "" {
+				continue
+			}
+			chunkBuilder.WriteString(lineText)
+			chunkBuilder.WriteByte('\n')
+
+			if err := growReservation(); err != nil {
 				return err
 			}
-			if _, err := bufWriter.WriteString("\n"); err != nil {
-				return err
+
+			if chunkThreshold > 0 && chunkBuilder.Len() >= chunkThreshold {
+				if err := flushChunk(); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -292,7 +411,7 @@ func groupTextsByLines(texts []Text) [][]Text {
 	// Sort texts by Y position (top to bottom)
 	sortedTexts := make([]Text, len(texts))
 	copy(sortedTexts, texts)
-	
+
 	// Use a simple sorting algorithm - for very large arrays,
 	// a more efficient algorithm may be needed
 	for i := 0; i < len(sortedTexts); i++ {
@@ -342,7 +461,7 @@ func buildLineText(texts []Text) string {
 	// Sort texts by X position (left to right) within the line
 	sortedTexts := make([]Text, len(texts))
 	copy(sortedTexts, texts)
-	
+
 	for i := 0; i < len(sortedTexts); i++ {
 		for j := i + 1; j < len(sortedTexts); j++ {
 			if sortedTexts[i].X > sortedTexts[j].X {
@@ -423,12 +542,12 @@ func (stc *StreamingTextClassifier) ClassifyTextStream(reader *Reader) (<-chan C
 }
 
 // ProcessLargePDF handles very large PDFs with streaming
-func ProcessLargePDF(reader *Reader, chunkSize, bufferSize int, maxMemory int64, 
+func ProcessLargePDF(reader *Reader, chunkSize, bufferSize int, maxMemory int64,
 	handler func(PageStream) error) error {
-	
+
 	extractor := NewMemoryEfficientExtractor(chunkSize, bufferSize, maxMemory)
 	defer extractor.processor.Close()
-	
+
 	return extractor.processor.ProcessPageStream(reader, handler)
 }
 
@@ -469,4 +588,26 @@ func (sme *StreamingMetadataExtractor) ExtractMetadataStream(reader *Reader) (<-
 	}()
 
 	return metaChan, errChan
+}
+
+func estimateTextMemory(text Text) int64 {
+	return int64(len(text.S)) + 128
+}
+
+func estimateBlockMemory(block *TextBlock) int64 {
+	if block == nil {
+		return 128
+	}
+	size := int64(128)
+	for _, t := range block.Texts {
+		size += int64(len(t.S)) + 64
+	}
+	return size
+}
+
+func estimatePageMemory(textCount int) int64 {
+	if textCount <= 0 {
+		return 64
+	}
+	return int64(textCount)*128 + 64
 }

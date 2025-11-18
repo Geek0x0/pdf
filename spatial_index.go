@@ -12,10 +12,10 @@ import (
 // This is a simple implementation using a grid-based approach; for production use,
 // consider a more sophisticated structure like R-tree
 type SpatialIndex struct {
-	grid         map[GridKey][]Text
-	cellSize     float64
-	bounds       Rect
-	texts        []Text
+	grid     map[GridKey][]Text
+	cellSize float64
+	bounds   Rect
+	texts    []Text
 }
 
 // GridKey represents a grid cell identifier
@@ -27,7 +27,7 @@ type GridKey struct {
 func NewSpatialIndex(texts []Text) *SpatialIndex {
 	if len(texts) == 0 {
 		return &SpatialIndex{
-			grid: make(map[GridKey][]Text),
+			grid:  make(map[GridKey][]Text),
 			texts: texts,
 		}
 	}
@@ -51,7 +51,7 @@ func NewSpatialIndex(texts []Text) *SpatialIndex {
 	}
 
 	bounds := Rect{Min: Point{X: minX, Y: minY}, Max: Point{X: maxX, Y: maxY}}
-	
+
 	// Use average font size as cell size for reasonable granularity
 	totalSize := 0.0
 	for _, t := range texts {
@@ -135,11 +135,11 @@ func (si *SpatialIndex) intersects(bounds Rect, t Text) bool {
 		Min: Point{X: t.X, Y: t.Y},
 		Max: Point{X: t.X + t.W, Y: t.Y + t.FontSize},
 	}
-	
-	return !(textBounds.Max.X < bounds.Min.X || 
-	         textBounds.Min.X > bounds.Max.X || 
-	         textBounds.Max.Y < bounds.Min.Y || 
-	         textBounds.Min.Y > bounds.Max.Y)
+
+	return !(textBounds.Max.X < bounds.Min.X ||
+		textBounds.Min.X > bounds.Max.X ||
+		textBounds.Max.Y < bounds.Min.Y ||
+		textBounds.Min.Y > bounds.Max.Y)
 }
 
 // RTreeSpatialIndex provides a more sophisticated spatial index using a proper R-tree implementation
@@ -624,9 +624,9 @@ func (rt *RTreeSpatialIndex) queryNode(node *RTreeNode, bounds Rect) []Text {
 // intersects checks if two rectangles intersect
 func (rt *RTreeSpatialIndex) intersects(rect1, rect2 Rect) bool {
 	return !(rect1.Max.X < rect2.Min.X ||
-	         rect1.Min.X > rect2.Max.X ||
-	         rect1.Max.Y < rect2.Min.Y ||
-	         rect1.Min.Y > rect2.Max.Y)
+		rect1.Min.X > rect2.Max.X ||
+		rect1.Max.Y < rect2.Min.Y ||
+		rect1.Min.Y > rect2.Max.Y)
 }
 
 // SpatialIndex interface to allow using either grid or R-tree implementation

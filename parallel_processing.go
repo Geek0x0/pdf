@@ -7,6 +7,7 @@ package pdf
 import (
 	"context"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -360,150 +361,146 @@ func (pte *ParallelTextExtractor) ParallelSort(ctx context.Context, texts []Text
 		return nil
 	}
 
-	// For smaller collections, use regular sort
-	if len(texts) < 10000 {
-		// Implement a custom parallel sort for larger collections
-		// For now, we'll just use regular sort as an example
-		// In a real implementation, we'd implement merge sort or another algorithm
-		parallelMergeSort(ctx, texts, less, pte.processor.numWorkers)
-		return nil
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	// For large collections, use parallel sort
-	return pte.parallelSortInternal(ctx, texts, less)
-}
+	// For smaller collections, use the standard library sort for better efficiency
+	if len(texts) < 10000 {
+		sort.Slice(texts, less)
+		return ctx.Err()
+	}
 
-// parallelSortInternal implements parallel sorting using divide and conquer
-func (pte *ParallelTextExtractor) parallelSortInternal(ctx context.Context, texts []Text, less func(i, j int) bool) error {
-	// This is a simplified version - a full implementation would be more complex
-	// Split the texts into chunks and sort them in parallel
-	chunkSize := len(texts) / pte.processor.numWorkers
+	workers := pte.processor.numWorkers
+	if workers < 2 {
+		workers = 2
+	}
+
+	chunkSize := (len(texts) + workers - 1) / workers
 	if chunkSize < 1000 {
 		chunkSize = 1000
 	}
+	if chunkSize > len(texts) {
+		chunkSize = len(texts)
+	}
 
+	type job struct {
+		start int
+		end   int
+	}
+
+	jobs := make(chan job)
+	errChan := make(chan error, 1)
 	var wg sync.WaitGroup
-	errChan := make(chan error, pte.processor.numWorkers)
 
-	start := 0
-	for start < len(texts) {
+	worker := func() {
+		defer wg.Done()
+		for job := range jobs {
+			if err := ctx.Err(); err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+			sort.Slice(texts[job.start:job.end], func(i, j int) bool {
+				return less(job.start+i, job.start+j)
+			})
+		}
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go worker()
+	}
+
+	for start := 0; start < len(texts); start += chunkSize {
 		end := start + chunkSize
 		if end > len(texts) {
 			end = len(texts)
 		}
 
-		wg.Add(1)
-		go func(s, e int) {
-			defer wg.Done()
-			select {
-			case <-ctx.Done():
-				errChan <- ctx.Err()
-				return
-			default:
-			}
-
-			// Sort this chunk
-			for i := s; i < e-1; i++ {
-				for j := i + 1; j < e; j++ {
-					if less(j, i) {
-						texts[i], texts[j] = texts[j], texts[i]
-					}
-				}
-			}
-		}(start, end)
-
-		start = end
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
+		case jobs <- job{start: start, end: end}:
+		}
 	}
+	close(jobs)
+	wg.Wait()
 
-	// Close the error channel once all goroutines complete
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-
-	// Check for errors
-	for err := range errChan {
+	select {
+	case err := <-errChan:
 		if err != nil {
 			return err
 		}
+	default:
 	}
 
-	// Merge the sorted chunks (simplified approach)
-	// A full implementation would use a proper merge algorithm
-	return nil
+	temp := make([]Text, len(texts))
+	if err := mergeChunksWithContext(ctx, texts, temp, chunkSize, less); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
-// parallelMergeSort implements parallel merge sort (simplified version)
-func parallelMergeSort(ctx context.Context, texts []Text, less func(i, j int) bool, numWorkers int) {
-	if len(texts) <= 1 {
-		return
+// mergeChunksWithContext merges sorted chunks while honoring context cancellation.
+func mergeChunksWithContext(ctx context.Context, texts, temp []Text, chunkSize int, less func(i, j int) bool) error {
+	if chunkSize <= 0 || chunkSize >= len(texts) {
+		return ctx.Err()
 	}
 
-	// For small arrays, use standard sort
-	if len(texts) < 10000 {
-		standardSort(texts, less)
-		return
-	}
+	for currentSize := chunkSize; currentSize < len(texts); currentSize *= 2 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-	// Divide and conquer approach
-	mid := len(texts) / 2
-	left := texts[:mid]
-	right := texts[mid:]
-
-	// Process left and right recursively
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		parallelMergeSort(ctx, left, less, numWorkers/2)
-	}()
-
-	go func() {
-		defer wg.Done()
-		parallelMergeSort(ctx, right, less, numWorkers/2)
-	}()
-
-	wg.Wait()
-
-	// Merge the results
-	merge(left, right, texts, less)
-}
-
-// standardSort implements a simple bubble sort (in a real implementation, use a more efficient algorithm)
-func standardSort(texts []Text, less func(i, j int) bool) {
-	for i := 0; i < len(texts); i++ {
-		for j := i + 1; j < len(texts); j++ {
-			if less(j, i) {
-				texts[i], texts[j] = texts[j], texts[i]
+		for start := 0; start < len(texts); start += 2 * currentSize {
+			mid := start + currentSize
+			if mid > len(texts) {
+				mid = len(texts)
 			}
+			end := start + 2*currentSize
+			if end > len(texts) {
+				end = len(texts)
+			}
+
+			if mid >= end {
+				continue
+			}
+
+			mergeRanges(texts, temp, start, mid, end, less)
+			copy(texts[start:end], temp[start:end])
 		}
 	}
+
+	return ctx.Err()
 }
 
-// merge merges two sorted slices into one
-func merge(left, right, result []Text, less func(i, j int) bool) {
-	i, j, k := 0, 0, 0
+// mergeRanges merges two sorted ranges [start,mid) and [mid,end) into temp.
+func mergeRanges(texts, temp []Text, start, mid, end int, less func(i, j int) bool) {
+	i, j, k := start, mid, start
 
-	for i < len(left) && j < len(right) {
+	for i < mid && j < end {
 		if less(i, j) || !less(j, i) {
-			result[k] = left[i]
+			temp[k] = texts[i]
 			i++
 		} else {
-			result[k] = right[j]
+			temp[k] = texts[j]
 			j++
 		}
 		k++
 	}
 
-	for i < len(left) {
-		result[k] = left[i]
+	for i < mid {
+		temp[k] = texts[i]
 		i++
 		k++
 	}
-
-	for j < len(right) {
-		result[k] = right[j]
+	for j < end {
+		temp[k] = texts[j]
 		j++
 		k++
 	}

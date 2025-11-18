@@ -209,7 +209,6 @@ type cacheEntry struct {
 func Open(file string) (*os.File, *Reader, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		f.Close()
 		return nil, nil, err
 	}
 	fi, err := f.Stat()

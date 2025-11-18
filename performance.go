@@ -143,7 +143,7 @@ type FastStringBuilder struct {
 // NewFastStringBuilder creates a builder with estimated capacity
 func NewFastStringBuilder(estimatedSize int) *FastStringBuilder {
 	return &FastStringBuilder{
-		buf: make([]byte, 0, estimatedSize),
+		buf: make([]byte, 0, EstimateCapacity(estimatedSize, 1.5)),
 	}
 }
 

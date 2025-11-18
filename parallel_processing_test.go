@@ -2,7 +2,10 @@ package pdf
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -180,7 +183,7 @@ func TestParallelTextExtractor(t *testing.T) {
 func TestParallelSort(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a large slice of texts to sort
+	// Create a moderate slice of texts to sort (uses single-threaded path)
 	texts := make([]Text, 1000)
 	for i := range texts {
 		texts[i] = Text{
@@ -218,13 +221,40 @@ func TestParallelSort(t *testing.T) {
 	}
 }
 
+// TestParallelSortLargeDataset ensures large inputs are sorted correctly using the parallel path
+func TestParallelSortLargeDataset(t *testing.T) {
+	ctx := context.Background()
+
+	texts := make([]Text, 25000)
+	for i := range texts {
+		texts[i] = Text{
+			X: float64(len(texts) - i),
+			S: fmt.Sprintf("text-%d", i),
+		}
+	}
+
+	pte := &ParallelTextExtractor{processor: NewParallelProcessor(4)}
+	less := func(i, j int) bool {
+		return texts[i].X < texts[j].X
+	}
+
+	if err := pte.ParallelSort(ctx, texts, less); err != nil {
+		t.Fatalf("ParallelSort returned error: %v", err)
+	}
+
+	for i := 1; i < len(texts); i++ {
+		if texts[i-1].X > texts[i].X {
+			t.Fatalf("slice not sorted at index %d", i)
+		}
+	}
+}
+
 // TestParallelSortWithCancellation tests cancellation during parallel sort
 func TestParallelSortWithCancellation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create a large slice to ensure the sort takes some time
-	texts := make([]Text, 10000)
+	texts := make([]Text, 15000)
 	for i := range texts {
 		texts[i] = Text{
 			X: float64(i),
@@ -233,14 +263,17 @@ func TestParallelSortWithCancellation(t *testing.T) {
 
 	pte := &ParallelTextExtractor{processor: NewParallelProcessor(4)}
 
-	// Sorting should be fast, but the cancellation test ensures the function responds to context
+	var once sync.Once
 	err := pte.ParallelSort(ctx, texts, func(i, j int) bool {
+		once.Do(cancel) // cancel context during the first comparison
 		return texts[i].X < texts[j].X
 	})
 
-	// Should not get an error for timeout since sort is fast
-	if err != nil && err != context.DeadlineExceeded {
-		t.Errorf("Unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
 

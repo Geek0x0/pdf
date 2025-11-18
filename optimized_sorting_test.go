@@ -320,7 +320,7 @@ func TestInsertionSort(t *testing.T) {
 		return texts[i].X < texts[j].X
 	}
 
-	os.insertionSort(texts, 0, len(texts)-1, less)
+	os.insertionSortRange(texts, 0, len(texts)-1, less)
 
 	// Should be sorted [1, 2, 3, 4, 5]
 	expected := []float64{1, 2, 3, 4, 5}

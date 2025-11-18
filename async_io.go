@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -23,6 +24,13 @@ func NewAsyncReader(reader *Reader) *AsyncReader {
 		Reader:    reader,
 		processor: NewParallelProcessor(runtime.NumCPU()),
 	}
+}
+
+func (ar *AsyncReader) workerCount() int {
+	if ar == nil || ar.processor == nil || ar.processor.numWorkers <= 0 {
+		return runtime.NumCPU()
+	}
+	return ar.processor.numWorkers
 }
 
 // AsyncExtractText extracts text from all pages asynchronously
@@ -44,28 +52,33 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			return
 		}
 
-		// Create channels for async page processing
+		workers := ar.workerCount()
+		if workers > totalPages {
+			workers = totalPages
+		}
+
 		pageResults := make(chan struct {
 			pageNum int
 			text    string
 			err     error
-		}, totalPages)
-
-		// Launch goroutines to process each page
+		}, workers)
+		workChan := make(chan int)
 		var wg sync.WaitGroup
-		for i := 1; i <= totalPages; i++ {
-			wg.Add(1)
-			go func(pageNum int) {
-				defer wg.Done()
 
+		worker := func() {
+			defer wg.Done()
+			for pageNum := range workChan {
 				select {
 				case <-ctx.Done():
-					pageResults <- struct {
+					select {
+					case pageResults <- struct {
 						pageNum int
 						text    string
 						err     error
-					}{pageNum: pageNum, text: "", err: ctx.Err()}
-					return
+					}{pageNum: pageNum, text: "", err: ctx.Err()}:
+					default:
+					}
+					continue
 				default:
 				}
 
@@ -76,10 +89,25 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 					text    string
 					err     error
 				}{pageNum: pageNum, text: text, err: err}
-			}(i)
+			}
 		}
 
-		// Close pageResults when all pages are processed
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go worker()
+		}
+
+		go func() {
+			defer close(workChan)
+			for pageNum := 1; pageNum <= totalPages; pageNum++ {
+				select {
+				case <-ctx.Done():
+					return
+				case workChan <- pageNum:
+				}
+			}
+		}()
+
 		go func() {
 			wg.Wait()
 			close(pageResults)
@@ -99,6 +127,9 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			pageTexts[result.pageNum-1] = result.text
 		}
 
+		if firstErr == nil {
+			firstErr = ctx.Err()
+		}
 		if firstErr != nil {
 			select {
 			case errChan <- firstErr:
@@ -107,11 +138,11 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			return
 		}
 
-		// Combine all page texts
-		var combinedText string
+		var builder strings.Builder
 		for _, text := range pageTexts {
-			combinedText += text
+			builder.WriteString(text)
 		}
+		combinedText := builder.String()
 
 		select {
 		case resultChan <- combinedText:
@@ -158,10 +189,9 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 			err     error
 		}, len(pageList))
 
-		// Use parallel processing
 		workers := opts.Workers
 		if workers <= 0 {
-			workers = runtime.NumCPU()
+			workers = ar.workerCount()
 		}
 
 		// Launch page processing workers
@@ -228,6 +258,9 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 			pageTexts[result.pageNum] = result.text
 		}
 
+		if firstErr == nil {
+			firstErr = ctx.Err()
+		}
 		if firstErr != nil {
 			select {
 			case errChan <- firstErr:
@@ -236,11 +269,11 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 			return
 		}
 
-		// Combine results in page order
-		var combinedText string
+		var builder strings.Builder
 		for _, pageNum := range pageList {
-			combinedText += pageTexts[pageNum]
+			builder.WriteString(pageTexts[pageNum])
 		}
+		combinedText := builder.String()
 
 		select {
 		case resultChan <- combinedText:
@@ -449,7 +482,7 @@ func (ar *AsyncReader) StreamValueReader(ctx context.Context, v Value) (<-chan [
 				// Create a copy of the buffer to send
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				
+
 				select {
 				case dataChan <- data:
 				case <-ctx.Done():

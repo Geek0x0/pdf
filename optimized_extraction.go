@@ -39,8 +39,8 @@ func optimizedTextRunsToPlain(texts []Text) string {
 
 	const lineTolerance = 2.0
 	// Pre-allocate lines slice with estimated capacity
-	lines := make([][]Text, 0, len(runs)/5+1) // Estimate 5 text runs per line
-	currentLine := make([]Text, 0, 10)        // Pre-allocate with reasonable capacity
+	lines := make([][]Text, 0, EstimateCapacity(len(runs)/5+1, 1.2)) // Estimate 5 text runs per line
+	currentLine := make([]Text, 0, EstimateCapacity(10, 1.5))        // Pre-allocate with reasonable capacity
 	var currentCoord float64
 
 	for i, t := range runs {

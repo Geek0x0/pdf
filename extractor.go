@@ -199,12 +199,17 @@ func (e *Extractor) extractPlainText(pages []int) (string, error) {
 
 // extractPlainTextSequential extracts text sequentially
 func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
-	var result string
+	// P0优化: 使用strings.Builder代替字符串拼接
+	builder := GetBuilder()
+	defer PutBuilder(builder)
 
-	for _, pageNum := range pages {
+	// 预估容量: 平均每页2KB
+	builder.Grow(len(pages) * 2048)
+
+	for i, pageNum := range pages {
 		select {
 		case <-e.ctx.Done():
-			return result, e.ctx.Err()
+			return builder.String(), e.ctx.Err()
 		default:
 		}
 
@@ -226,13 +231,13 @@ func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
 			}
 		}
 
-		result += text
-		if pageNum < pages[len(pages)-1] {
-			result += "\n"
+		builder.WriteString(text)
+		if i < len(pages)-1 {
+			builder.WriteByte('\n')
 		}
 	}
 
-	return result, nil
+	return builder.String(), nil
 }
 
 // extractStyledTexts extracts styled texts from specified pages

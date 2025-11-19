@@ -927,6 +927,7 @@ func appendLine(builder *strings.Builder, line []Text) {
 	}
 }
 
+//go:inline
 func effectiveLineCoord(t Text) float64 {
 	if t.Vertical {
 		return t.X
@@ -934,6 +935,7 @@ func effectiveLineCoord(t Text) float64 {
 	return t.Y
 }
 
+//go:inline
 func effectiveOrderCoord(t Text) float64 {
 	if t.Vertical {
 		return -t.Y

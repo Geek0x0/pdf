@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"pdf"
+	"github.com/Geek0x0/pdf"
 )
 
 func main() {

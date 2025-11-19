@@ -105,6 +105,8 @@ func optimizedTextRunsToPlain(texts []Text) string {
 }
 
 // optimizedAppendLine appends a line of text with space detection (optimized version)
+//
+//go:inline
 func optimizedAppendLine(builder *strings.Builder, line []Text) {
 	const minGap = 0.5
 	var prevEnd float64

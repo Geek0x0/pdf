@@ -470,21 +470,31 @@ func buildLineText(texts []Text) string {
 		}
 	}
 
-	var result string
+	// P0优化: 使用strings.Builder代替字符串拼接
+	builder := GetBuilder()
+	defer PutBuilder(builder)
+
+	// 预估容量
+	totalLen := 0
+	for _, t := range sortedTexts {
+		totalLen += len(t.S)
+	}
+	builder.Grow(totalLen + len(sortedTexts))
+
 	var lastX float64
 	for i, t := range sortedTexts {
 		if i > 0 {
 			// Add space if there's a significant gap
 			gap := t.X - lastX
 			if gap > 5.0 { // Threshold for adding space
-				result += " "
+				builder.WriteByte(' ')
 			}
 		}
-		result += t.S
+		builder.WriteString(t.S)
 		lastX = t.X + t.W
 	}
 
-	return result
+	return builder.String()
 }
 
 // abs returns the absolute value of a float64

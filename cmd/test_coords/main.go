@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
-	"pdf"
+
+	"github.com/Geek0x0/pdf"
 )
 
 func main() {

@@ -12,7 +12,7 @@ import (
 	"log"
 	"os"
 
-	"rsc.io/pdf"
+	"github.com/Geek0x0/pdf"
 )
 
 var (

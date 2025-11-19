@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"pdf"
 	"strings"
+
+	"github.com/Geek0x0/pdf"
 )
 
 func main() {

@@ -49,13 +49,10 @@ type buffer struct {
 
 // newBuffer returns a new buffer reading from r at the given offset.
 func newBuffer(r io.Reader, offset int64) *buffer {
-	return &buffer{
-		r:           r,
-		offset:      offset,
-		buf:         make([]byte, 0, 4096),
-		allowObjptr: true,
-		allowStream: true,
-	}
+	b := GetPDFBuffer()
+	b.r = r
+	b.offset = offset
+	return b
 }
 
 func (b *buffer) seek(offset int64) {

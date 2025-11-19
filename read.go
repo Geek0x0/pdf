@@ -112,6 +112,12 @@ func (fc *FontCache) Set(key string, font *Font) {
 	fc.fonts[key] = font
 }
 
+// P2优化: 全局多级缓存实例
+var (
+	globalMultiLevelCache = NewMultiLevelCache()
+	globalFontCache       = NewFontCache()
+)
+
 // A Reader is a single PDF file open for reading.
 type Reader struct {
 	f          io.ReaderAt
@@ -263,9 +269,11 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	pos := end - endChunk + int64(i)
 	b := newBuffer(io.NewSectionReader(f, pos, end-pos), pos)
 	if b.readToken() != keyword("startxref") {
+		PutPDFBuffer(b)
 		return nil, fmt.Errorf("malformed PDF file: missing startxref")
 	}
 	startxref, ok := b.readToken().(int64)
+	PutPDFBuffer(b)
 	if !ok {
 		return nil, fmt.Errorf("malformed PDF file: startxref not followed by integer")
 	}
@@ -321,6 +329,7 @@ func (r *Reader) Trailer() Value {
 }
 
 func readXref(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
+	defer PutPDFBuffer(b)
 	tok := b.readToken()
 	if tok == keyword("xref") {
 		return readXrefTable(r, b)
@@ -365,6 +374,7 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		obj1 := b.readObject()
 		obj, ok := obj1.(objdef)
+		PutPDFBuffer(b)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref prev stream not found: %v", objfmt(obj1))
 		}
@@ -499,10 +509,12 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		}
 		table, err = readXrefTableData(b, table)
 		if err != nil {
+			PutPDFBuffer(b)
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 		}
 
 		trailer, ok := b.readObject().(dict)
+		PutPDFBuffer(b)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev table not followed by trailer dictionary")
 		}
@@ -586,6 +598,7 @@ func (r *Reader) recoverTrailer(data []byte) error {
 		return errors.New("trailer not found")
 	}
 	buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
+	defer PutPDFBuffer(buf)
 	buf.allowEOF = true
 	if tok := buf.readToken(); tok != keyword("trailer") {
 		return errors.New("malformed recovered trailer")
@@ -952,6 +965,7 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 						b.seekForward(first + off)
 						x = b.readObject()
 						r.storeCachedObject(ptr, x)
+						PutPDFBuffer(b)
 						break Search
 					}
 				}
@@ -976,6 +990,7 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 			}
 			x = def.obj
 			r.storeCachedObject(ptr, x)
+			PutPDFBuffer(b)
 		}
 		parent = ptr
 	}

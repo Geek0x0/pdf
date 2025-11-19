@@ -38,9 +38,11 @@ func optimizedTextRunsToPlain(texts []Text) string {
 	sort.Sort(TextVertical(runs))
 
 	const lineTolerance = 2.0
-	// Pre-allocate lines slice with estimated capacity
-	lines := make([][]Text, 0, EstimateCapacity(len(runs)/5+1, 1.2)) // Estimate 5 text runs per line
-	currentLine := make([]Text, 0, EstimateCapacity(10, 1.5))        // Pre-allocate with reasonable capacity
+	// P0优化: 使用自适应容量估算器
+	lineCapacity := lineCapacityEstimator.Estimate(len(runs)/5 + 1)
+	textCapacity := textCapacityEstimator.Estimate(10)
+	lines := make([][]Text, 0, lineCapacity)
+	currentLine := make([]Text, 0, textCapacity)
 	var currentCoord float64
 
 	for i, t := range runs {
@@ -72,8 +74,15 @@ func optimizedTextRunsToPlain(texts []Text) string {
 		lines = append(lines, currentLine)
 	}
 
-	// Estimate final string size (average 50 chars per line)
-	estimatedSize := len(lines) * 50
+	// P0优化: 使用批量字符串构建器，精确计算所需容量
+	totalChars := 0
+	for _, line := range lines {
+		for _, t := range line {
+			totalChars += len(t.S)
+		}
+	}
+	estimatedSize := totalChars + len(lines)*2 // 加上换行符和空格
+
 	builder := GetBuilder()
 	defer PutBuilder(builder)
 
@@ -88,6 +97,10 @@ func optimizedTextRunsToPlain(texts []Text) string {
 	}
 
 	result := builder.String()
+
+	// P0优化: 记录实际容量用于未来估算
+	lineCapacityEstimator.Record(len(lines))
+
 	return strings.TrimRight(result, "\n")
 }
 

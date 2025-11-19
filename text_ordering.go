@@ -72,7 +72,23 @@ func smartTextOrdering(texts []Text) []Text {
 
 // clusterTextBlocks groups nearby texts into coherent blocks
 // using a simplified distance-based clustering approach
+// P1优化: 使用KD-Tree加速聚类，从O(n²)优化到O(n log n)
 func clusterTextBlocks(texts []Text) []*TextBlock {
+	if len(texts) == 0 {
+		return nil
+	}
+
+	// 对于小数据集，使用简单方法（调优后阈值：200）
+	if len(texts) < 200 {
+		return clusterTextBlocksSimple(texts)
+	}
+
+	// 对于大数据集，使用优化的KD-Tree方法
+	return ClusterTextBlocksOptimized(texts)
+}
+
+// clusterTextBlocksSimple 简单聚类方法（用于小数据集）
+func clusterTextBlocksSimple(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
 	}

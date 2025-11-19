@@ -135,6 +135,44 @@ func PutByteBuffer(buf *[]byte) {
 	byteBufferPool.Put(buf)
 }
 
+// Pool for PDF buffers (used in lexing and parsing)
+var pdfBufferPool = sync.Pool{
+	New: func() interface{} {
+		return &buffer{
+			buf:         make([]byte, 0, 65536), // 64KB capacity
+			tmp:         make([]byte, 0, 256),   // 256B for tokens
+			unread:      make([]token, 0, 16),   // capacity for unread tokens
+			key:         make([]byte, 0, 64),    // capacity for keys
+			allowObjptr: true,
+			allowStream: true,
+		}
+	},
+}
+
+// GetPDFBuffer retrieves a PDF buffer from the pool
+func GetPDFBuffer() *buffer {
+	return pdfBufferPool.Get().(*buffer)
+}
+
+// PutPDFBuffer returns a PDF buffer to the pool after resetting
+func PutPDFBuffer(b *buffer) {
+	// Reset all fields
+	b.r = nil
+	b.buf = b.buf[:0]
+	b.pos = 0
+	b.offset = 0
+	b.tmp = b.tmp[:0]
+	b.unread = b.unread[:0]
+	b.allowEOF = false
+	b.allowObjptr = true
+	b.allowStream = true
+	b.eof = false
+	b.key = b.key[:0]
+	b.useAES = false
+	b.objptr = objptr{}
+	pdfBufferPool.Put(b)
+}
+
 // FastStringBuilder provides optimized string building with pre-allocation
 type FastStringBuilder struct {
 	buf []byte

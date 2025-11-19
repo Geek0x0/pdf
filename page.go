@@ -33,7 +33,8 @@ func parseFontStyles(fontName string) (bold, italic, underline bool) {
 // A Page represent a single page in a PDF file.
 // The methods interpret a Page dictionary stored in V.
 type Page struct {
-	V Value
+	V         Value
+	fontCache FontCacheInterface // Optional font cache for performance optimization (interface supports both implementations)
 }
 
 // Page returns the page for the given page number.
@@ -46,7 +47,7 @@ Search:
 	for page.Key("Type").Name() == "Pages" {
 		count := int(page.Key("Count").Int64())
 		if count < num {
-			return Page{}
+			return Page{V: Value{}}
 		}
 		kids := page.Key("Kids")
 		for i := 0; i < kids.Len(); i++ {
@@ -62,19 +63,32 @@ Search:
 			}
 			if kid.Key("Type").Name() == "Page" {
 				if num == 0 {
-					return Page{kid}
+					return Page{V: kid}
 				}
 				num--
 			}
 		}
 		break
 	}
-	return Page{}
+	return Page{V: Value{}}
 }
 
 // NumPage returns the number of pages in the PDF file.
 func (r *Reader) NumPage() int {
 	return int(r.Trailer().Key("Root").Key("Pages").Key("Count").Int64())
+}
+
+// SetFontCache sets a font cache for this page to improve performance
+// during text extraction by reusing parsed fonts.
+// Deprecated: Use SetFontCacheInterface for better flexibility.
+func (p *Page) SetFontCache(cache *GlobalFontCache) {
+	p.fontCache = cache
+}
+
+// SetFontCacheInterface sets a font cache using the interface
+// This supports both GlobalFontCache and OptimizedFontCache
+func (p *Page) SetFontCacheInterface(cache FontCacheInterface) {
+	p.fontCache = cache
 }
 
 // GetPlainText returns all the text in the PDF file
@@ -162,7 +176,26 @@ func (p Page) Fonts() []string {
 
 // Font returns the font with the given name associated with the page.
 func (p Page) Font(name string) Font {
-	return Font{p.Resources().Key("Font").Key(name), nil}
+	fontValue := p.Resources().Key("Font").Key(name)
+
+	// Use global font cache if available
+	if p.fontCache != nil {
+		// Generate cache key from page resources and font name
+		key := fmt.Sprintf("page:%v:font:%s", p.V, name)
+
+		// Try to get from cache
+		if cached, ok := p.fontCache.Get(key); ok {
+			return *cached
+		}
+
+		// Create new font and cache it
+		font := Font{fontValue, nil}
+		p.fontCache.Set(key, &font)
+		return font
+	}
+
+	// No cache available, return new font
+	return Font{fontValue, nil}
 }
 
 // A Font represent a font in a PDF file.

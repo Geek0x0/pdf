@@ -379,3 +379,85 @@ func ExampleStreamingBatchExtractor() {
 	//     log.Fatal(err)
 	// }
 }
+
+func TestQuicksortPageResults(t *testing.T) {
+	results := []pageResult{
+		{pageNum: 3, text: "third"},
+		{pageNum: 1, text: "first"},
+		{pageNum: 2, text: "second"},
+	}
+
+	quicksortPageResults(results, 0, len(results)-1)
+
+	if results[0].pageNum != 1 || results[1].pageNum != 2 || results[2].pageNum != 3 {
+		t.Error("quicksortPageResults failed")
+	}
+}
+
+func TestPartitionPageResults(t *testing.T) {
+	results := []pageResult{
+		{pageNum: 3, text: "third"},
+		{pageNum: 1, text: "first"},
+		{pageNum: 2, text: "second"},
+	}
+
+	pivot := partitionPageResults(results, 0, len(results)-1)
+
+	// Check that pivot is in correct position
+	if results[pivot].pageNum != 2 {
+		t.Errorf("Expected pivot at page 2, got %d", results[pivot].pageNum)
+	}
+}
+
+func TestNewStreamingBatchExtractor(t *testing.T) {
+	reader := &Reader{}
+	opts := BatchExtractOptions{}
+	extractor := NewStreamingBatchExtractor(reader, opts)
+
+	if extractor.reader != reader {
+		t.Error("Expected reader to be set")
+	}
+	if extractor.opts.Workers != opts.Workers {
+		t.Error("Expected opts to be set")
+	}
+}
+
+func TestStreamingBatchExtractorStart(t *testing.T) {
+	reader := &Reader{}
+	opts := BatchExtractOptions{}
+	extractor := NewStreamingBatchExtractor(reader, opts)
+
+	// Just test that Start doesn't panic
+	extractor.Start()
+}
+
+func TestStreamingBatchExtractorNext(t *testing.T) {
+	reader := &Reader{}
+	opts := BatchExtractOptions{}
+	extractor := NewStreamingBatchExtractor(reader, opts)
+
+	extractor.Start()
+
+	// Since no real extraction, Next should return nil
+	result := extractor.Next()
+	if result != nil {
+		t.Error("Expected nil result for empty extraction")
+	}
+}
+
+func TestStreamingBatchExtractorProcessAll(t *testing.T) {
+	reader := &Reader{}
+	opts := BatchExtractOptions{}
+	extractor := NewStreamingBatchExtractor(reader, opts)
+
+	extractor.Start()
+
+	// Test with a callback that does nothing
+	err := extractor.ProcessAll(func(BatchResult) error {
+		return nil
+	})
+
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+}

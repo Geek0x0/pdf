@@ -48,16 +48,10 @@ package pdf
 // BUG(rsc): The package is incomplete, although it has been used successfully on some
 // large real-world PDF files.
 
-// BUG(rsc): There is no support for closing open PDF files. If you drop all references to a Reader,
-// the underlying reader will eventually be garbage collected.
+// BUG(rsc): The library makes no attempt at efficiency beyond the value cache and font cache.
+// Further optimizations could improve performance for large files.
 
-// BUG(rsc): The library makes no attempt at efficiency. A value cache maintained in the Reader
-// would probably help significantly.
-
-// BUG(rsc): The support for reading encrypted files is weak.
-
-// BUG(rsc): The Value API does not support error reporting. The intent is to allow users to
-// set an error reporting callback in Reader, but that code has not been implemented.
+// BUG(rsc): The support for reading encrypted files is limited to basic RC4 and AES encryption.
 
 import (
 	"bufio"
@@ -65,6 +59,7 @@ import (
 	"compress/lzw"
 	"compress/zlib"
 	"container/list"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
@@ -75,11 +70,26 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// toLatin1 converts a UTF-8 string to Latin-1 (ISO-8859-1) encoding.
+// Characters that cannot be represented in Latin-1 are replaced with '?'.
+func toLatin1(s string) []byte {
+	b := make([]byte, 0, len(s))
+	for _, r := range s {
+		if r < 256 {
+			b = append(b, byte(r))
+		} else {
+			b = append(b, '?')
+		}
+	}
+	return b
+}
 
 // DebugOn is responsible for logging messages into stdout. If problems arise during reading, set it true.
 var DebugOn = false
@@ -121,6 +131,7 @@ var (
 // A Reader is a single PDF file open for reading.
 type Reader struct {
 	f          io.ReaderAt
+	closer     io.Closer // Optional closer for underlying resource
 	end        int64
 	xref       []xref
 	trailer    dict
@@ -211,6 +222,15 @@ type cacheEntry struct {
 	value object
 }
 
+// Close closes the Reader and releases associated resources.
+// If the underlying ReaderAt implements io.Closer, it will be closed.
+func (r *Reader) Close() error {
+	if r.closer != nil {
+		return r.closer.Close()
+	}
+	return nil
+}
+
 // Open opens a file for reading.
 func Open(file string) (*os.File, *Reader, error) {
 	f, err := os.Open(file)
@@ -232,7 +252,15 @@ func Open(file string) (*os.File, *Reader, error) {
 
 // NewReader opens a file for reading, using the data in f with the given total size.
 func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
-	return NewReaderEncrypted(f, size, nil)
+	r, err := NewReaderEncrypted(f, size, nil)
+	if err != nil {
+		return nil, err
+	}
+	// If f implements io.Closer, store it for cleanup
+	if closer, ok := f.(io.Closer); ok {
+		r.closer = closer
+	}
+	return r, nil
 }
 
 // NewReaderEncrypted opens a file for reading, using the data in f with the given total size.
@@ -1266,7 +1294,7 @@ func (r *Reader) initEncrypt(password string) error {
 	P := uint32(p)
 
 	// TODO: Password should be converted to Latin-1.
-	pw := []byte(password)
+	pw := toLatin1(password)
 	h := md5.New()
 	if len(pw) >= 32 {
 		h.Write(pw[:32])
@@ -1433,4 +1461,58 @@ func (r *cbcReader) Read(b []byte) (n int, err error) {
 	n = copy(b, r.pend)
 	r.pend = r.pend[n:]
 	return n, nil
+}
+
+// ExtractAllPagesParallel 使用增强的并行提取器提取所有页面文本
+// 这个方法集成了所有性能优化：分片缓存、字体预取、零拷贝等
+func (r *Reader) ExtractAllPagesParallel(ctx context.Context, workers int) ([]string, error) {
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+
+	// 创建并行提取器
+	extractor := NewParallelExtractor(workers)
+	defer extractor.Close()
+
+	// 收集所有页面
+	numPages := r.NumPage()
+	pages := make([]Page, numPages)
+	for i := 0; i < numPages; i++ {
+		pages[i] = r.Page(i + 1)
+		// 为每个页面设置字体缓存（使用提取器的优化缓存）
+		pages[i].SetFontCacheInterface(extractor.prefetcher.cache)
+	}
+
+	// 并行提取所有页面
+	textsPerPage, err := extractor.ExtractAllPages(ctx, pages)
+	if err != nil {
+		return nil, err
+	}
+
+	// 将每页的文本块合并为字符串
+	results := make([]string, len(textsPerPage))
+	for i, texts := range textsPerPage {
+		if len(texts) == 0 {
+			results[i] = ""
+			continue
+		}
+
+		// 计算总长度
+		totalLen := 0
+		for _, t := range texts {
+			totalLen += len(t.S) + 1 // +1 for space
+		}
+
+		// 使用零拷贝字符串构建
+		builder := NewStringBuffer(totalLen)
+		for j, t := range texts {
+			builder.WriteString(t.S)
+			if j < len(texts)-1 {
+				builder.WriteByte(' ')
+			}
+		}
+		results[i] = builder.StringCopy()
+	}
+
+	return results, nil
 }

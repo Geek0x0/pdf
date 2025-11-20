@@ -275,6 +275,7 @@ func BenchmarkSizedBytePoolVsDirect(b *testing.B) {
 			for j := 0; j < size; j++ {
 				buf = append(buf, byte(j))
 			}
+			_ = buf // use the result
 		}
 	})
 }

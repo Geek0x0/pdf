@@ -584,9 +584,8 @@ func (mlc *MultiLevelCache) Prefetch(keys []string) {
 	// 异步预取
 	go func() {
 		for _, key := range keys {
-			if _, ok := mlc.Get(key); !ok {
-				// 触发加载逻辑（需要外部实现）
-			}
+			mlc.Get(key)
+			// 如果未命中，可以触发外部加载逻辑
 		}
 	}()
 }

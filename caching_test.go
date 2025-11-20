@@ -787,3 +787,312 @@ func TestEstimateSize(t *testing.T) {
 		}
 	}
 }
+
+func TestCacheEntryIsExpired(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		entry    CacheEntry
+		expected bool
+	}{
+		{
+			name: "not expired - no expiration set",
+			entry: CacheEntry{
+				Expiration: time.Time{},
+			},
+			expected: false,
+		},
+		{
+			name: "not expired - future expiration",
+			entry: CacheEntry{
+				Expiration: now.Add(time.Hour),
+			},
+			expected: false,
+		},
+		{
+			name: "expired - past expiration",
+			entry: CacheEntry{
+				Expiration: now.Add(-time.Hour),
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.entry.IsExpired()
+			if result != tt.expected {
+				t.Errorf("IsExpired() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResultCacheEvictOne(t *testing.T) {
+	cache := NewResultCache(100, 1*time.Hour, "LRU") // Small size to force eviction
+
+	// Add items until we exceed capacity
+	cache.Put("key1", "value1")
+	cache.Put("key2", "value2")
+	cache.Put("key3", "value3") // This should trigger eviction
+
+	// Check that we still have some items (exact eviction depends on implementation)
+	stats := cache.GetStats()
+	if stats.Entries == 0 {
+		t.Error("Expected some entries to remain after eviction")
+	}
+}
+
+func TestResultCacheCleanupExpired(t *testing.T) {
+	cache := NewResultCache(1024*1024, 10*time.Millisecond, "LRU")
+
+	cache.Put("key1", "value1")
+	cache.Put("key2", "value2")
+
+	// Wait for expiration
+	time.Sleep(20 * time.Millisecond)
+
+	// Trigger cleanup by accessing (this might not be perfect, but tests the concept)
+	cache.Get("key1") // This should trigger cleanup
+
+	// Check that expired items are gone
+	_, found1 := cache.Get("key1")
+	_, found2 := cache.Get("key2")
+
+	if found1 || found2 {
+		t.Error("Expected expired items to be cleaned up")
+	}
+}
+
+func TestResultCacheGetStats(t *testing.T) {
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+
+	cache.Put("key1", "value1")
+	cache.Get("key1") // Hit
+	cache.Get("key2") // Miss
+
+	stats := cache.GetStats()
+
+	if stats.Hits != 1 {
+		t.Errorf("Expected 1 hit, got %d", stats.Hits)
+	}
+	if stats.Misses != 1 {
+		t.Errorf("Expected 1 miss, got %d", stats.Misses)
+	}
+	if stats.Entries != 1 {
+		t.Errorf("Expected 1 entry, got %d", stats.Entries)
+	}
+}
+
+func TestResultCacheGetHitRatio(t *testing.T) {
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+
+	cache.Put("key1", "value1")
+	cache.Get("key1") // Hit
+	cache.Get("key2") // Miss
+	cache.Get("key1") // Hit
+
+	ratio := cache.GetHitRatio()
+
+	expected := 2.0 / 3.0 // 2 hits out of 3 accesses
+	if ratio != expected {
+		t.Errorf("Expected hit ratio %.2f, got %.2f", expected, ratio)
+	}
+}
+
+func TestCacheKeyGeneratorGeneratePageContentKey(t *testing.T) {
+	gen := NewCacheKeyGenerator()
+	key := gen.GeneratePageContentKey(5, "hash123")
+	expected := "page_content_hash123_5"
+	if key != expected {
+		t.Errorf("Expected key %s, got %s", expected, key)
+	}
+}
+
+func TestCacheKeyGeneratorGenerateTextClassificationKey(t *testing.T) {
+	gen := NewCacheKeyGenerator()
+	key := gen.GenerateTextClassificationKey(3, "hash456", "params")
+	expected := "text_classification_hash456_3_params"
+	if key != expected {
+		t.Errorf("Expected key %s, got %s", expected, key)
+	}
+}
+
+func TestCacheKeyGeneratorGenerateTextOrderingKey(t *testing.T) {
+	gen := NewCacheKeyGenerator()
+	key := gen.GenerateTextOrderingKey(7, "hash789", "order_params")
+	expected := "text_ordering_hash789_7_order_params"
+	if key != expected {
+		t.Errorf("Expected key %s, got %s", expected, key)
+	}
+}
+
+func TestCacheKeyGeneratorGenerateReaderHash(t *testing.T) {
+	gen := NewCacheKeyGenerator()
+	reader := &Reader{} // Mock reader
+	hash := gen.GenerateReaderHash(reader)
+	if hash == "" {
+		t.Error("Expected non-empty hash")
+	}
+}
+
+func TestCacheKeyGeneratorGenerateFullHash(t *testing.T) {
+	gen := NewCacheKeyGenerator()
+	hash1 := gen.GenerateFullHash("test data")
+	hash2 := gen.GenerateFullHash("test data")
+	if hash1 != hash2 {
+		t.Error("Expected same hash for same input")
+	}
+	if hash1 == "" {
+		t.Error("Expected non-empty hash")
+	}
+}
+
+func TestCachedReaderCachedPage(t *testing.T) {
+	// This test would require a mock reader, which is complex
+	// For now, just test the structure
+	reader := &Reader{}
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+	cachedReader := NewCachedReader(reader, cache)
+
+	// We can't easily test CachedPage without a real PDF reader
+	// This is a placeholder for integration testing
+	_ = cachedReader
+}
+
+func TestGetGlobalCache(t *testing.T) {
+	cache1 := GetGlobalCache()
+	cache2 := GetGlobalCache()
+
+	if cache1 != cache2 {
+		t.Error("Expected singleton cache instance")
+	}
+}
+
+func TestCacheManagerGetters(t *testing.T) {
+	manager := NewCacheManager()
+
+	if manager.GetPageCache() != manager.pageCache {
+		t.Error("GetPageCache should return page cache")
+	}
+	if manager.GetClassificationCache() != manager.classificationCache {
+		t.Error("GetClassificationCache should return classification cache")
+	}
+	if manager.GetTextOrderingCache() != manager.textOrderingCache {
+		t.Error("GetTextOrderingCache should return text ordering cache")
+	}
+	if manager.GetMetadataCache() != manager.metadataCache {
+		t.Error("GetMetadataCache should return metadata cache")
+	}
+}
+
+func TestCacheManagerGetTotalStats(t *testing.T) {
+	manager := NewCacheManager()
+
+	// Add some data to caches
+	manager.pageCache.Put("key1", "value1")
+	manager.classificationCache.Put("key2", "value2")
+
+	stats := manager.GetTotalStats()
+
+	if stats.Entries != 2 {
+		t.Errorf("Expected 2 total entries, got %d", stats.Entries)
+	}
+}
+
+func TestNewCacheContext(t *testing.T) {
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+	ctx := context.Background()
+	cacheCtx := NewCacheContext(ctx, cache)
+
+	if cacheCtx.cache != cache {
+		t.Error("Expected cache to be set")
+	}
+	if cacheCtx.ctx == nil {
+		t.Error("Expected context to be set")
+	}
+}
+
+func TestCacheContextGetWithTimeout(t *testing.T) {
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+	ctx := context.Background()
+	cacheCtx := NewCacheContext(ctx, cache)
+
+	cache.Put("key1", "value1")
+
+	value, found, err := cacheCtx.GetWithTimeout("key1", 100*time.Millisecond)
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if !found {
+		t.Error("Expected to find the key")
+	}
+	if value != "value1" {
+		t.Errorf("Expected value 'value1', got %v", value)
+	}
+}
+
+func TestCacheContextClose(t *testing.T) {
+	cache := NewResultCache(1024*1024, 1*time.Hour, "LRU")
+	ctx := context.Background()
+	cacheCtx := NewCacheContext(ctx, cache)
+
+	// Just test that Close doesn't panic
+	cacheCtx.Close()
+}
+
+func TestNewConnectionPool(t *testing.T) {
+	newFunc := func() interface{} { return "new connection" }
+	closeFunc := func(interface{}) {}
+
+	pool := NewConnectionPool(5, newFunc, closeFunc)
+
+	if pool.maxSize != 5 {
+		t.Errorf("Expected maxSize 5, got %d", pool.maxSize)
+	}
+	if pool.new == nil {
+		t.Error("Expected new function to be set")
+	}
+	if pool.close == nil {
+		t.Error("Expected close function to be set")
+	}
+}
+
+func TestConnectionPoolGetPut(t *testing.T) {
+	newFunc := func() interface{} { return "new connection" }
+	closeFunc := func(interface{}) {}
+
+	pool := NewConnectionPool(2, newFunc, closeFunc)
+
+	// Get a connection
+	conn1 := pool.Get()
+	if conn1 != "new connection" {
+		t.Errorf("Expected 'new connection', got %v", conn1)
+	}
+
+	// Put it back
+	pool.Put(conn1)
+
+	// Get again (should reuse)
+	conn2 := pool.Get()
+	if conn2 != conn1 {
+		t.Error("Expected to reuse connection")
+	}
+}
+
+func TestConnectionPoolClose(t *testing.T) {
+	closed := false
+	newFunc := func() interface{} { return "connection" }
+	closeFunc := func(interface{}) { closed = true }
+
+	pool := NewConnectionPool(1, newFunc, closeFunc)
+
+	conn := pool.Get()
+	pool.Put(conn)
+	pool.Close()
+
+	if !closed {
+		t.Error("Expected close function to be called")
+	}
+}

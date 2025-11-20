@@ -50,8 +50,8 @@ func (sp *SizedPool) Get(size int) []byte {
 	return buf[:0]
 }
 
-func (sp *SizedPool) Put(buf []byte) {
-	size := cap(buf)
+func (sp *SizedPool) Put(bufPtr *[]byte) {
+	size := cap(*bufPtr)
 	idx := bits.Len(uint(size)) - 5
 	if idx < 0 {
 		idx = 0
@@ -59,7 +59,9 @@ func (sp *SizedPool) Put(buf []byte) {
 		idx = len(sp.pools) - 1
 	}
 
-	sp.pools[idx].Put(buf[:0])
+	// Return buffer to appropriate pool (slice to zero length)
+	*bufPtr = (*bufPtr)[:0]
+	sp.pools[idx].Put(bufPtr)
 }
 
 // 2. 零拷贝字符串构建器
@@ -95,9 +97,9 @@ func (b *ZeroCopyBuilder) Reset() {
 type LockFreeRingBuffer struct {
 	buffer []interface{}
 	mask   uint64
-	head   uint64 // 写位置
-	tail   uint64 // 读位置
-	_pad1  [56]byte
+	head   uint64   // 写位置
+	tail   uint64   // 读位置
+	_      [56]byte // cache line padding to prevent false sharing
 }
 
 func NewLockFreeRingBuffer(size int) *LockFreeRingBuffer {
@@ -486,7 +488,7 @@ func ExampleOptimizations() {
 	pool := NewSizedPool()
 	buf := pool.Get(100)
 	// ... 使用buf
-	pool.Put(buf)
+	pool.Put(&buf)
 
 	// 2. 零拷贝字符串构建
 	builder := NewZeroCopyBuilder(1024)

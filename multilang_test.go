@@ -9,7 +9,7 @@ func TestNewMultiLangProcessor(t *testing.T) {
 	processor := NewMultiLangProcessor()
 
 	if processor == nil {
-		t.Error("Expected multi-language processor to be created")
+		t.Fatal("Expected multi-language processor to be created")
 	}
 
 	// Check that common words are loaded
@@ -292,10 +292,10 @@ func TestNewLanguageTextExtractor(t *testing.T) {
 	extractor := NewLanguageTextExtractor()
 
 	if extractor == nil {
-		t.Error("Expected language text extractor to be created")
+		t.Fatal("Expected language text extractor to be created")
 	}
 	if extractor.processor == nil {
-		t.Error("Expected processor to be initialized")
+		t.Fatal("Expected processor to be initialized")
 	}
 }
 
@@ -348,13 +348,13 @@ func TestNewMultiLanguageTextClassifier(t *testing.T) {
 	classifier := NewMultiLanguageTextClassifier(texts, 600, 800)
 
 	if classifier == nil {
-		t.Error("Expected multi-language classifier to be created")
+		t.Fatal("Expected multi-language classifier to be created")
 	}
 	if classifier.processor == nil {
-		t.Error("Expected processor to be initialized")
+		t.Fatal("Expected processor to be initialized")
 	}
 	if classifier.TextClassifier == nil {
-		t.Error("Expected base classifier to be initialized")
+		t.Fatal("Expected base classifier to be initialized")
 	}
 }
 

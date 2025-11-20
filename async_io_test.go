@@ -426,3 +426,53 @@ func BenchmarkAsyncExtractStructured(b *testing.B) {
 		}
 	}
 }
+
+func TestAsyncReaderWorkerCount(t *testing.T) {
+	mockReader := &Reader{}
+	asyncReader := NewAsyncReader(mockReader)
+
+	count := asyncReader.workerCount()
+	if count <= 0 {
+		t.Error("Expected positive worker count")
+	}
+}
+
+func TestNewAsyncReaderAt(t *testing.T) {
+	// Test NewAsyncReaderAt function
+	reader := strings.NewReader("test data")
+	asyncReader := NewAsyncReaderAt(reader)
+
+	if asyncReader == nil {
+		t.Error("Expected non-nil AsyncReaderAt")
+	}
+}
+
+func TestAsyncReaderAtReadAt(t *testing.T) {
+	reader := strings.NewReader("hello world")
+	asyncReader := NewAsyncReaderAt(reader)
+
+	buf := make([]byte, 5)
+	ctx := context.Background()
+	nChan, errChan := asyncReader.ReadAtAsync(ctx, buf, 6) // Read "world"
+
+	select {
+	case n := <-nChan:
+		if n != 5 {
+			t.Errorf("Expected to read 5 bytes, got %d", n)
+		}
+		if string(buf) != "world" {
+			t.Errorf("Expected 'world', got %q", string(buf))
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("ReadAtAsync timed out")
+	}
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		// No error is also fine
+	}
+}

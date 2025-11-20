@@ -461,12 +461,11 @@ func BenchmarkOptimizationImpact(b *testing.B) {
 
 	b.Run("WithoutOptimizations", func(b *testing.B) {
 		// 不使用优化
+		var result []Text
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			result := make([]Text, 0) // 不预分配
-			for j := range texts {
-				result = append(result, texts[j])
-			}
+			result = append(result[:0], texts...)
 		}
+		_ = result
 	})
 }

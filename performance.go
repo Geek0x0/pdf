@@ -49,9 +49,14 @@ func GetTextBySize(contentLength int) *Text {
 
 // PutText returns a Text object to the appropriate pool
 func PutText(t *Text) {
+	// Determine pool based on content size before reset
+	useSmallPool := len(t.S) < 100
+
 	// Reset the object before returning to pool
 	*t = Text{}
-	if len(t.S) < 100 {
+
+	// Return to appropriate pool
+	if useSmallPool {
 		smallTextPool.Put(t)
 	} else {
 		largeTextPool.Put(t)

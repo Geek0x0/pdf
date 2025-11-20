@@ -915,14 +915,60 @@ func textRunsToPlain(texts []Text) string {
 		lines = append(lines, currentLine)
 	}
 
-	var builder strings.Builder
+	// 使用零拷贝 StringBuffer 提升性能
+	totalLen := 0
+	for _, line := range lines {
+		for _, t := range line {
+			totalLen += len(t.S) + 1 // +1 for potential space
+		}
+		totalLen++ // for newline
+	}
+
+	builder := NewStringBuffer(totalLen)
 	for i, line := range lines {
-		appendLine(&builder, line)
+		appendLineZC(builder, line)
 		if i < len(lines)-1 {
 			builder.WriteByte('\n')
 		}
 	}
-	return strings.TrimRight(builder.String(), "\n")
+	result := builder.String()
+	return TrimSpaceZeroCopy(result)
+}
+
+// appendLineZC 零拷贝版本的 appendLine
+func appendLineZC(builder *StringBuffer, line []Text) {
+	const minGap = 0.5
+	var prevEnd float64
+	hasPrev := false
+	allVertical := true
+	for _, t := range line {
+		if !t.Vertical {
+			allVertical = false
+			break
+		}
+	}
+
+	for _, t := range line {
+		if hasPrev {
+			var gap float64
+			if allVertical {
+				gap = math.Abs(t.Y - prevEnd)
+			} else {
+				gap = t.X - prevEnd
+			}
+			spaceThreshold := math.Max(t.FontSize*0.2, minGap)
+			if gap > spaceThreshold && !allVertical {
+				builder.WriteByte(' ')
+			}
+		}
+		builder.WriteString(t.S)
+		if allVertical {
+			prevEnd = t.Y
+		} else {
+			prevEnd = t.X + t.W
+		}
+		hasPrev = true
+	}
 }
 
 func appendLine(builder *strings.Builder, line []Text) {

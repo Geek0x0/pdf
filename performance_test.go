@@ -452,3 +452,130 @@ func TestTextPoolBySize(t *testing.T) {
 	PutText(smallText)
 	PutText(largeText)
 }
+
+func TestGetText(t *testing.T) {
+	text := GetText()
+	if text == nil {
+		t.Error("Expected non-nil Text")
+	}
+}
+
+func TestGetTextBySize(t *testing.T) {
+	smallText := GetTextBySize(50)
+	if smallText == nil {
+		t.Error("Expected non-nil small Text")
+	}
+
+	largeText := GetTextBySize(150)
+	if largeText == nil {
+		t.Error("Expected non-nil large Text")
+	}
+}
+
+func TestPutText(t *testing.T) {
+	text := &Text{S: "test"}
+	PutText(text) // Just test that it doesn't panic
+}
+
+func TestGetBuilder(t *testing.T) {
+	builder := GetBuilder()
+	if builder == nil {
+		t.Error("Expected non-nil builder")
+	}
+}
+
+func TestPutBuilder(t *testing.T) {
+	builder := GetBuilder()
+	PutBuilder(builder) // Just test that it doesn't panic
+}
+
+func TestGetBlockSlice(t *testing.T) {
+	slice := GetBlockSlice()
+	if slice == nil {
+		t.Error("Expected non-nil slice")
+	}
+}
+
+func TestPutBlockSlice(t *testing.T) {
+	slice := make([]ClassifiedBlock, 5)
+	PutBlockSlice(slice) // Just test that it doesn't panic
+}
+
+func TestGetTextSlice(t *testing.T) {
+	slice := GetTextSlice()
+	if slice == nil {
+		t.Error("Expected non-nil slice")
+	}
+}
+
+func TestPutTextSlice(t *testing.T) {
+	slice := make([]Text, 5)
+	PutTextSlice(slice) // Just test that it doesn't panic
+}
+
+func TestGetByteBuffer(t *testing.T) {
+	bufPtr := GetByteBuffer()
+	if bufPtr == nil {
+		t.Error("Expected non-nil buffer pointer")
+	}
+	buf := *bufPtr
+	if cap(buf) == 0 {
+		t.Error("Expected buffer with capacity")
+	}
+}
+
+func TestPutByteBuffer(t *testing.T) {
+	buf := make([]byte, 50)
+	PutByteBuffer(&buf) // Just test that it doesn't panic
+}
+
+func TestGetPDFBuffer(t *testing.T) {
+	buf := GetPDFBuffer()
+	if buf == nil {
+		t.Error("Expected non-nil buffer")
+	}
+}
+
+func TestPutPDFBuffer(t *testing.T) {
+	buf := &buffer{}
+	PutPDFBuffer(buf) // Just test that it doesn't panic
+}
+
+func TestNewFastStringBuilder(t *testing.T) {
+	builder := NewFastStringBuilder(100)
+	if builder == nil {
+		t.Error("Expected non-nil builder")
+	}
+}
+
+func TestFastStringBuilderWriteString(t *testing.T) {
+	builder := NewFastStringBuilder(100)
+	builder.WriteString("test")
+	// WriteString doesn't return values, just test it doesn't panic
+}
+
+func TestFastStringBuilderString(t *testing.T) {
+	builder := NewFastStringBuilder(100)
+	builder.WriteString("hello")
+	result := builder.String()
+	if result != "hello" {
+		t.Errorf("Expected 'hello', got %q", result)
+	}
+}
+
+func TestFastStringBuilderLen(t *testing.T) {
+	builder := NewFastStringBuilder(100)
+	builder.WriteString("test")
+	if builder.Len() != 4 {
+		t.Errorf("Expected length 4, got %d", builder.Len())
+	}
+}
+
+func TestFastStringBuilderReset(t *testing.T) {
+	builder := NewFastStringBuilder(100)
+	builder.WriteString("test")
+	builder.Reset()
+	if builder.Len() != 0 {
+		t.Errorf("Expected length 0 after reset, got %d", builder.Len())
+	}
+}

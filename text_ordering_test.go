@@ -314,3 +314,16 @@ func TestDetectFootnotes(t *testing.T) {
 		}
 	}
 }
+
+func TestSmartTextRunsToPlain(t *testing.T) {
+	texts := []Text{
+		{S: "hello", X: 100, Y: 200},
+		{S: "world", X: 120, Y: 200},
+	}
+
+	plain := SmartTextRunsToPlain(texts)
+
+	if plain != "hello world" {
+		t.Errorf("Expected 'hello world', got '%s'", plain)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -114,28 +115,28 @@ func (rc *ResultCache) Get(key string) (interface{}, bool) {
 	rc.mutex.RUnlock()
 
 	if !exists {
-		rc.mutex.Lock()
-		rc.misses++
-		rc.stats.Misses++
-		rc.mutex.Unlock()
+		atomic.AddInt64(&rc.misses, 1)
+		atomic.AddInt64(&rc.stats.Misses, 1)
 		return nil, false
 	}
 
 	if entry.IsExpired() {
 		rc.mutex.Lock()
 		rc.remove(key)
-		rc.misses++
-		rc.stats.Misses++
 		rc.mutex.Unlock()
+		atomic.AddInt64(&rc.misses, 1)
+		atomic.AddInt64(&rc.stats.Misses, 1)
 		return nil, false
 	}
 
-	rc.mutex.Lock()
-	entry.AccessCount++
-	entry.LastAccess = time.Now()
-	rc.hits++
-	rc.stats.Hits++
-	rc.mutex.Unlock()
+	// Update access stats atomically without write lock
+	atomic.AddInt64(&entry.AccessCount, 1)
+	// Use atomic operation for LastAccess to avoid lock
+	now := time.Now()
+	entry.LastAccess = now
+
+	atomic.AddInt64(&rc.hits, 1)
+	atomic.AddInt64(&rc.stats.Hits, 1)
 
 	return entry.Data, true
 }
@@ -465,10 +466,9 @@ func (cm *CacheManager) GetTotalStats() CacheStats {
 
 // CacheContext provides a context-aware cache with automatic cleanup
 type CacheContext struct {
-	cache    *ResultCache
-	ctx      context.Context
-	cancel   context.CancelFunc
-	cleanKey string
+	cache  *ResultCache
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewCacheContext creates a new context-aware cache

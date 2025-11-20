@@ -192,9 +192,10 @@ func (omp *OptimizedMemoryPool) Get() []byte {
 }
 
 // Put returns a buffer to the pool, resetting it
-func (omp *OptimizedMemoryPool) Put(buf []byte) {
-	buf = buf[:0]
-	omp.pool.Put(buf)
+func (omp *OptimizedMemoryPool) Put(bufPtr *[]byte) {
+	// Reset to zero length
+	*bufPtr = (*bufPtr)[:0]
+	omp.pool.Put(bufPtr)
 }
 
 // EstimateCapacity provides better capacity estimation for slices

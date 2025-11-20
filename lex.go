@@ -236,9 +236,6 @@ Loop:
 			tmp = append(tmp, c)
 		case '\\':
 			switch c = b.readByte(); c {
-			default:
-				b.errorf("invalid escape sequence \\%c", c)
-				tmp = append(tmp, '\\', c)
 			case 'n':
 				tmp = append(tmp, '\n')
 			case 'r':
@@ -272,6 +269,10 @@ Loop:
 					b.errorf("invalid octal escape \\%03o", x)
 				}
 				tmp = append(tmp, byte(x))
+			default:
+				// PDF spec: if the character following the backslash is not recognized,
+				// the backslash is ignored and the character is treated literally
+				tmp = append(tmp, c)
 			}
 		}
 	}

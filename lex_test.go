@@ -97,3 +97,55 @@ func TestBufferUnreadByte(t *testing.T) {
 		t.Errorf("Expected 'e' after unread, got %c", b3)
 	}
 }
+
+func TestReadLiteralStringWithInvalidEscape(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "invalid escape sequence with special char",
+			input:    "(test\\óstring)",
+			expected: "testóstring",
+		},
+		{
+			name:     "valid escape sequences",
+			input:    "(test\\nline\\ttab)",
+			expected: "test\nline\ttab",
+		},
+		{
+			name:     "mixed valid and invalid escapes",
+			input:    "(hello\\nworld\\ó)",
+			expected: "hello\nworldó",
+		},
+		{
+			name:     "backslash before parenthesis",
+			input:    "(test\\(paren\\))",
+			expected: "test(paren)",
+		},
+		{
+			name:     "octal escape",
+			input:    "(test\\101)",
+			expected: "testA",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := strings.NewReader(tt.input)
+			buf := newBuffer(reader, 0)
+			buf.allowEOF = true
+
+			// Skip the opening parenthesis
+			tok := buf.readToken()
+			if str, ok := tok.(string); ok {
+				if str != tt.expected {
+					t.Errorf("Expected %q, got %q", tt.expected, str)
+				}
+			} else {
+				t.Errorf("Expected string token, got %T", tok)
+			}
+		})
+	}
+}

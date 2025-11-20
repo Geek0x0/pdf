@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Test Coverage](https://img.shields.io/badge/coverage-43.6%25-orange.svg)](https://github.com/Geek0x0/gopdf)
+[![Test Coverage](https://img.shields.io/badge/coverage-66.9%25-yellow.svg)](https://github.com/Geek0x0/gopdf)
 
 GoPDF is a powerful PDF processing library written in Go, focused on efficient text extraction, content analysis, and multilingual support. Built with a modular architecture, it provides high-performance concurrent processing capabilities.
 

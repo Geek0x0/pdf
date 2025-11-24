@@ -309,7 +309,15 @@ func (f Font) Width(code int) float64 {
 }
 
 // Encoder returns the encoding between font code point sequences and UTF-8.
-func (f Font) Encoder() TextEncoding {
+// Pointer receiver is required so the computed encoder is cached on the shared
+// Font instance instead of a copy. The previous value-receiver implementation
+// rebuilt the encoder for every call, causing large allocations to pile up
+// during batch extraction.
+func (f *Font) Encoder() TextEncoding {
+	if f == nil {
+		return nil
+	}
+
 	if f.enc == nil { // caching the Encoder so we don't have to continually parse charmap
 		f.enc = f.buildEncoder()
 		if f.enc == nil {
@@ -319,7 +327,7 @@ func (f Font) Encoder() TextEncoding {
 	return f.enc
 }
 
-func (f Font) buildEncoder() TextEncoding {
+func (f *Font) buildEncoder() TextEncoding {
 	if f.subtype() == "Type0" {
 		if enc := f.type0Encoder(); enc != nil {
 			return enc
@@ -335,7 +343,7 @@ func (f Font) buildEncoder() TextEncoding {
 	return f.simpleEncoder()
 }
 
-func (f Font) simpleEncoder() TextEncoding {
+func (f *Font) simpleEncoder() TextEncoding {
 	enc := f.V.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
@@ -366,7 +374,7 @@ func (f Font) simpleEncoder() TextEncoding {
 	}
 }
 
-func (f Font) type0Encoder() TextEncoding {
+func (f *Font) type0Encoder() TextEncoding {
 	// Prefer ToUnicode if available
 	if enc := f.cmapEncodingFromValue(f.V.Key("ToUnicode")); enc != nil {
 		return enc

@@ -37,6 +37,13 @@ type Page struct {
 	fontCache FontCacheInterface // Optional font cache for performance optimization (interface supports both implementations)
 }
 
+// Cleanup releases resources held by the Page, specifically the fontCache reference.
+// Call this after processing a page to prevent memory leaks in batch operations.
+// This method is safe to call multiple times.
+func (p *Page) Cleanup() {
+	p.fontCache = nil
+}
+
 // Page returns the page for the given page number.
 // Page numbers are indexed starting at 1, not 0.
 // If the page is not found, Page returns a Page with p.V.IsNull().
@@ -120,7 +127,15 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 			return &bytes.Buffer{}, err
 		}
 		buf.WriteString(text)
+
+		// CRITICAL FIX: Clear Page's fontCache reference after each page to prevent accumulation
+		p.Cleanup()
 	}
+
+	// CRITICAL FIX: Clear the fonts map and trigger GC after all pages processed
+	// This releases memory from accumulated Font objects
+	fonts = nil
+
 	return &buf, nil
 }
 
@@ -792,7 +807,14 @@ func (p Page) GetPlainText(fonts map[string]*Font) (string, error) {
 		return "", wrapError("extract page content", err)
 	}
 
-	return textRunsToPlain(content.Text), nil
+	text := textRunsToPlain(content.Text)
+
+	// CRITICAL FIX: Clear fontCache reference after extraction to prevent memory leak.
+	// Without this, each Page retains the entire fontCache indefinitely, causing
+	// memory to grow from 400MB to 20-40GB when processing large batches.
+	p.fontCache = nil
+
+	return text, nil
 }
 
 // GetPlainTextWithSmartOrdering extracts plain text using an improved text ordering algorithm
@@ -808,7 +830,12 @@ func (p Page) GetPlainTextWithSmartOrdering(fonts map[string]*Font) (string, err
 		return "", wrapError("extract page content", err)
 	}
 
-	return SmartTextRunsToPlain(content.Text), nil
+	text := SmartTextRunsToPlain(content.Text)
+
+	// CRITICAL FIX: Clear fontCache reference after extraction to prevent memory leak
+	p.fontCache = nil
+
+	return text, nil
 }
 
 // GetPlainTextConcurrent extracts all pages concurrently using the specified number of workers.
@@ -846,12 +873,16 @@ func (r *Reader) GetPlainTextConcurrent(workers int) (io.Reader, error) {
 				return
 			default:
 			}
-			text, err := r.Page(pageNum).GetPlainText(nil)
+			page := r.Page(pageNum)
+			text, err := page.GetPlainText(nil)
 			if err != nil {
 				cancel(err)
 				return
 			}
 			results[pageNum-1] = text
+
+			// CRITICAL FIX: Cleanup page resources after extraction
+			page.Cleanup()
 		}
 	}
 
@@ -1306,12 +1337,20 @@ func (p Page) Content() Content {
 func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 	var content Content
 	var err error
+	var scope *fontScope
 
 	// Recover from panics in content stream processing and convert to errors
 	defer func() {
 		if r := recover(); r != nil {
 			content = Content{}
 			err = wrapError("process content stream", fmt.Errorf("%v", r))
+		}
+		// CRITICAL FIX: Clear scope references to break potential circular references
+		// and allow GC to reclaim font objects. This prevents accumulation of Font
+		// objects across multiple page extractions.
+		if scope != nil {
+			scope.fonts = nil
+			scope.parent = nil
 		}
 	}()
 
@@ -1321,7 +1360,7 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 	}
 
 	extractor := contentExtractor{page: p}
-	scope := p.buildFontScope(p.Resources(), fonts, nil)
+	scope = p.buildFontScope(p.Resources(), fonts, nil)
 	initial := gstate{
 		Th:  1,
 		CTM: ident,

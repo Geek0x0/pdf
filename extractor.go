@@ -234,6 +234,9 @@ func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
 		if i < len(pages)-1 {
 			builder.WriteByte('\n')
 		}
+
+		// CRITICAL FIX: Cleanup page resources after extraction
+		page.Cleanup()
 	}
 
 	// 返回副本（因为 builder 会被重用）
@@ -255,6 +258,9 @@ func (e *Extractor) extractStyledTexts(pages []int) ([]Text, error) {
 		content := page.Content()
 
 		allTexts = append(allTexts, content.Text...)
+
+		// CRITICAL FIX: Cleanup page resources
+		page.Cleanup()
 	}
 
 	return allTexts, nil
@@ -282,6 +288,9 @@ func (e *Extractor) extractStructuredText(pages []int) ([]ClassifiedBlock, error
 		}
 
 		allBlocks = append(allBlocks, blocks...)
+
+		// CRITICAL FIX: Cleanup page resources
+		page.Cleanup()
 	}
 
 	return allBlocks, nil

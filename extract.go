@@ -70,7 +70,8 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 			}
 
 			pageNum := pageList[idx]
-			text, err := r.Page(pageNum).GetPlainText(nil)
+			page := r.Page(pageNum)
+			text, err := page.GetPlainText(nil)
 			if err != nil {
 				select {
 				case errCh <- wrapPageError("extract text", pageNum, err):
@@ -79,6 +80,9 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 				return
 			}
 			results[idx] = text
+
+			// CRITICAL FIX: Cleanup page resources to prevent memory leak
+			page.Cleanup()
 		}
 	}
 

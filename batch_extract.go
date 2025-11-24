@@ -186,40 +186,40 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 		default:
 		}
 
-		// Extract page
-		page := r.Page(pageNum)
-		var text string
-		var err error
+		// Extract page - wrap in function to ensure defer runs per iteration
+		func() {
+			page := r.Page(pageNum)
+			var text string
+			var err error
 
-		// Enable font cache for this extraction if provided
-		if fontCache != nil {
-			// Wrap the interface in a cache adapter for the page
-			page.SetFontCacheInterface(fontCache)
-		}
+			// Enable font cache for this extraction if provided
+			if fontCache != nil {
+				page.SetFontCacheInterface(fontCache)
+			}
 
-		// CRITICAL: Use defer to ensure fontCache reference is always cleared,
-		// even if GetPlainText panics or returns early. Without this cleanup,
-		// each page retains the entire fontCache in memory indefinitely.
-		defer func() {
-			page.SetFontCacheInterface(nil)
+			// CRITICAL: Use defer to ensure fontCache reference is cleared after THIS page.
+			// The defer must be in this inner function so it runs per iteration, not at worker end.
+			defer func() {
+				page.SetFontCacheInterface(nil)
+				page.Cleanup()
+			}()
+
+			if opts.SmartOrdering {
+				text, err = page.GetPlainTextWithSmartOrdering(nil)
+			} else {
+				text, err = page.GetPlainText(nil)
+			}
+
+			// Send result
+			select {
+			case results <- BatchResult{
+				PageNum: pageNum,
+				Text:    text,
+				Error:   err,
+			}:
+			case <-opts.Context.Done():
+			}
 		}()
-
-		if opts.SmartOrdering {
-			text, err = page.GetPlainTextWithSmartOrdering(nil)
-		} else {
-			text, err = page.GetPlainText(nil)
-		}
-
-		// Send result, but don't block if context is cancelled or channel is full
-		select {
-		case results <- BatchResult{
-			PageNum: pageNum,
-			Text:    text,
-			Error:   err,
-		}:
-		case <-opts.Context.Done():
-			return
-		}
 	}
 }
 

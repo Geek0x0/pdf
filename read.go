@@ -317,6 +317,10 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		f:         f,
 		end:       end,
 		fontCache: NewFontCache(),
+		// CRITICAL FIX: Set default cache capacity to prevent unbounded growth.
+		// Without this limit, objCache can grow to gigabytes during batch processing.
+		// A capacity of 2000 objects provides good performance while limiting memory.
+		cacheCap: 2000,
 	}
 	pos := end - endChunk + int64(i)
 	b := newBuffer(io.NewSectionReader(f, pos, end-pos), pos)

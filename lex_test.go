@@ -149,3 +149,48 @@ func TestReadLiteralStringWithInvalidEscape(t *testing.T) {
 		})
 	}
 }
+
+func TestReadArrayStopsOnEOF(t *testing.T) {
+	input := "[1 2 3" // missing closing bracket should not spin forever
+	reader := strings.NewReader(input)
+	buf := newBuffer(reader, 0)
+	buf.allowEOF = true
+
+	// consume the opening bracket to mirror readObject behavior
+	if tok := buf.readToken(); tok != keyword("[") {
+		t.Fatalf("expected opening bracket, got %v", tok)
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for unterminated array")
+		}
+	}()
+
+	buf.readArray()
+}
+
+func TestReadArrayTooLarge(t *testing.T) {
+	var bld strings.Builder
+	bld.WriteByte('[')
+	for i := 0; i <= maxArrayElements; i++ { // limit + 1 elements
+		bld.WriteString("0 ")
+	}
+	bld.WriteByte(']')
+
+	buf := newBuffer(strings.NewReader(bld.String()), 0)
+	buf.allowEOF = true
+
+	// consume the opening bracket
+	if tok := buf.readToken(); tok != keyword("[") {
+		t.Fatalf("expected opening bracket, got %v", tok)
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for oversized array")
+		}
+	}()
+
+	buf.readArray()
+}

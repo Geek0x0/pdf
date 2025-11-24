@@ -12,6 +12,27 @@ import (
 	"unsafe"
 )
 
+// 对象池用于复用搜索结果切片,减少内存分配
+var resultPool = sync.Pool{
+	New: func() interface{} {
+		return make([]*TextBlock, 0, 32)
+	},
+}
+
+// 获取复用的结果切片
+func getResultSlice() []*TextBlock {
+	return resultPool.Get().([]*TextBlock)
+}
+
+// 归还结果切片到池中
+func putResultSlice(s []*TextBlock) {
+	if cap(s) > 1024 { // 避免保留过大的切片
+		return
+	}
+	s = s[:0]
+	resultPool.Put(s)
+}
+
 // ==================== 第一阶段优化示例 ====================
 
 // AdaptiveCapacityEstimator 自适应容量估算器
@@ -202,49 +223,76 @@ func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
 }
 
 // RangeSearch 范围搜索，返回距离目标点在指定半径内的所有文本块
+// 使用迭代方式替代递归,避免深度递归导致的大量内存分配
 func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 	if tree.root == nil {
 		return nil
 	}
 
-	// 预分配结果容量,减少 append 导致的内存重分配
-	// 估计结果数量为树节点的10%左右
-	result := make([]*TextBlock, 0, 16)
-	tree.rangeSearchRecursive(tree.root, target, radius, &result)
+	// 从对象池获取结果切片
+	result := getResultSlice()
+
+	// 使用栈进行迭代搜索,避免递归调用栈开销
+	type stackItem struct {
+		node *KDNode
+	}
+
+	// 使用固定大小的栈,避免动态扩容
+	stack := make([]stackItem, 0, 64)
+	stack = append(stack, stackItem{node: tree.root})
+
+	radiusSq := radius * radius
+
+	for len(stack) > 0 {
+		// 弹出栈顶元素
+		idx := len(stack) - 1
+		current := stack[idx].node
+		stack = stack[:idx]
+
+		if current == nil {
+			continue
+		}
+
+		// 计算当前点到目标点的距离平方
+		dist := euclideanDistance(current.point, target)
+		if dist <= radiusSq {
+			result = append(result, current.data)
+		}
+
+		// 计算到分割超平面的距离
+		planeDist := target[current.axis] - current.point[current.axis]
+		planeDist2 := planeDist * planeDist
+
+		// 决定搜索顺序
+		if planeDist < 0 {
+			// 先搜索左侧(近侧)
+			if current.left != nil {
+				stack = append(stack, stackItem{node: current.left})
+			}
+			// 如果超平面在范围内,也搜索右侧(远侧)
+			if planeDist2 <= radiusSq && current.right != nil {
+				stack = append(stack, stackItem{node: current.right})
+			}
+		} else {
+			// 先搜索右侧(近侧)
+			if current.right != nil {
+				stack = append(stack, stackItem{node: current.right})
+			}
+			// 如果超平面在范围内,也搜索左侧(远侧)
+			if planeDist2 <= radiusSq && current.left != nil {
+				stack = append(stack, stackItem{node: current.left})
+			}
+		}
+	}
+
 	return result
 }
 
+// 已废弃: 使用迭代方式替代
+// rangeSearchRecursive 的递归实现已被迭代方式取代
 func (tree *KDTree) rangeSearchRecursive(node *KDNode, target []float64, radius float64, result *[]*TextBlock) {
-	if node == nil {
-		return
-	}
-
-	// 计算当前点到目标点的距离
-	dist := euclideanDistance(node.point, target)
-	if dist <= radius {
-		*result = append(*result, node.data)
-	}
-
-	// 计算到分割超平面的距离
-	planeDist := target[node.axis] - node.point[node.axis]
-
-	// 决定先搜索哪一侧
-	var nearChild, farChild *KDNode
-	if planeDist < 0 {
-		nearChild = node.left
-		farChild = node.right
-	} else {
-		nearChild = node.right
-		farChild = node.left
-	}
-
-	// 搜索近侧
-	tree.rangeSearchRecursive(nearChild, target, radius, result)
-
-	// 如果超平面在搜索半径内，也需要搜索远侧
-	if planeDist*planeDist <= radius*radius {
-		tree.rangeSearchRecursive(farChild, target, radius, result)
-	}
+	// 此函数已废弃,保留仅为兼容性
+	// 实际使用迭代版本的 RangeSearch
 }
 
 func euclideanDistance(p1, p2 []float64) float64 {
@@ -254,6 +302,7 @@ func euclideanDistance(p1, p2 []float64) float64 {
 }
 
 // ClusterTextBlocksOptimized 使用KD树优化的文本块聚类
+// 优化版本:减少临时对象分配,使用对象池
 func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
@@ -261,17 +310,20 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 
 	// 计算平均字体大小作为距离阈值
 	var totalFontSize float64
-	for _, t := range texts {
-		totalFontSize += t.FontSize
+	for i := range texts {
+		totalFontSize += texts[i].FontSize
 	}
 	avgFontSize := totalFontSize / float64(len(texts))
 	distThreshold := avgFontSize * 2.0
+	distThresholdSq := distThreshold * distThreshold
 
 	// 初始化：每个文本作为独立块
+	// 优化: 预分配精确大小避免扩容
 	blocks := make([]*TextBlock, len(texts))
-	for i, t := range texts {
+	for i := range texts {
+		t := &texts[i]
 		blocks[i] = &TextBlock{
-			Texts:       []Text{t},
+			Texts:       []Text{*t},
 			MinX:        t.X,
 			MaxX:        t.X + t.W,
 			MinY:        t.Y,
@@ -289,12 +341,19 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		parent[i] = i
 	}
 
-	var find func(int) int
-	find = func(x int) int {
-		if parent[x] != x {
-			parent[x] = find(parent[x]) // 路径压缩
+	// 非递归的 find 函数,使用迭代路径压缩避免栈溢出
+	find := func(x int) int {
+		root := x
+		for parent[root] != root {
+			root = parent[root]
 		}
-		return parent[x]
+		// 路径压缩
+		for parent[x] != root {
+			next := parent[x]
+			parent[x] = root
+			x = next
+		}
+		return root
 	}
 
 	union := func(x, y int) {
@@ -313,7 +372,8 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 	// 对每个块查找近邻并合并
 	for i, block := range blocks {
 		center := block.Center()
-		neighbors := kdtree.RangeSearch([]float64{center.X, center.Y}, distThreshold*distThreshold)
+		// 使用优化后的迭代搜索
+		neighbors := kdtree.RangeSearch([]float64{center.X, center.Y}, distThresholdSq)
 
 		for _, neighbor := range neighbors {
 			if j, ok := blockToIdx[neighbor]; ok && i != j {
@@ -322,10 +382,14 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 				}
 			}
 		}
+
+		// 归还搜索结果切片到池中复用
+		putResultSlice(neighbors)
 	}
 
 	// 收集聚类结果
-	clusterMap := make(map[int][]*TextBlock)
+	// 优化: 预估集群数量减少 map 扩容
+	clusterMap := make(map[int][]*TextBlock, len(blocks)/4)
 	for i, block := range blocks {
 		root := find(i)
 		clusterMap[root] = append(clusterMap[root], block)

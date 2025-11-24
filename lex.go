@@ -406,6 +406,11 @@ type objdef struct {
 	obj object
 }
 
+// Hard limit to prevent runaway array allocations on malformed content streams.
+// Real-world PDFs keep operator argument arrays small (kerning, matrices, etc.),
+// so 100k elements is a generous cap while avoiding multi-GB slices.
+const maxArrayElements = 100_000
+
 func (b *buffer) readObject() object {
 	tok := b.readToken()
 	if kw, ok := tok.(keyword); ok {
@@ -466,6 +471,12 @@ func (b *buffer) readArray() object {
 		tok := b.readToken()
 		if tok == nil || tok == keyword("]") {
 			break
+		}
+		if tok == io.EOF {
+			b.errorf("unterminated array before EOF")
+		}
+		if len(x) >= maxArrayElements {
+			b.errorf("array too large (%d elements >= limit %d)", len(x), maxArrayElements)
 		}
 		b.unreadToken(tok)
 		x = append(x, b.readObject())

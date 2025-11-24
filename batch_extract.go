@@ -152,7 +152,14 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 		// Clean up font cache if used
 		if fontCache != nil {
 			fontCache.Clear()
+			fontCache = nil // Explicitly nil out reference for GC
 		}
+
+		// CRITICAL: Clear the Reader's object cache to release all accumulated objects.
+		// During batch processing, objCache can accumulate thousands of parsed PDF objects,
+		// consuming gigabytes of memory. Clearing it here ensures memory is released
+		// immediately after processing completes.
+		r.ClearCache()
 
 		// Trigger garbage collection to free accumulated memory from batch processing.
 		// Large PDF batch processing can create significant temporary allocations
@@ -186,16 +193,18 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 			page.SetFontCacheInterface(fontCache)
 		}
 
+		// CRITICAL: Use defer to ensure fontCache reference is always cleared,
+		// even if GetPlainText panics or returns early. Without this cleanup,
+		// each page retains the entire fontCache in memory indefinitely.
+		defer func() {
+			page.SetFontCacheInterface(nil)
+		}()
+
 		if opts.SmartOrdering {
 			text, err = page.GetPlainTextWithSmartOrdering(nil)
 		} else {
 			text, err = page.GetPlainText(nil)
 		}
-
-		// CRITICAL: Clean up page font cache reference to prevent memory leaks.
-		// The page holds a reference to the cache which must be cleared after extraction.
-		// Without this, each page retains the entire fontCache in memory indefinitely.
-		page.SetFontCacheInterface(nil)
 
 		// Send result, but don't block if context is cancelled or channel is full
 		select {
@@ -339,10 +348,14 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 	// Set a reasonable object cache capacity for the Reader to prevent unlimited growth.
 	// This is crucial for batch processing where many pages are extracted sequentially.
 	// Without this, the Reader's internal objCache can grow to gigabytes for large PDFs.
-	// We use a heuristic of 10x the number of pages as most pages reference multiple objects.
+	// We use a conservative heuristic: min(5000, pages * 10) to cap maximum cache size.
 	// Only set if not already configured to allow users to override this behavior.
 	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
-		r.SetCacheCapacity(len(pages) * 10)
+		cacheSize := len(pages) * 10
+		if cacheSize > 5000 {
+			cacheSize = 5000 // Cap at 5000 objects to prevent memory explosion
+		}
+		r.SetCacheCapacity(cacheSize)
 	}
 
 	go func() {
@@ -364,6 +377,12 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 		}
 
 		wg.Wait()
+
+		// CRITICAL: Clear the Reader's object cache to release all accumulated objects.
+		// During batch processing, objCache can accumulate thousands of parsed PDF objects,
+		// consuming gigabytes of memory. Clearing it here ensures memory is released
+		// immediately after processing completes.
+		r.ClearCache()
 
 		// Trigger garbage collection to free accumulated memory from batch processing.
 		// Large PDF batch processing can create significant temporary allocations

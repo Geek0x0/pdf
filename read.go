@@ -225,6 +225,19 @@ func (r *Reader) GetCacheCapacity() int {
 	return r.cacheCap
 }
 
+// ClearCache clears the object cache, releasing all cached objects.
+// This is useful for freeing memory after batch processing large PDFs.
+func (r *Reader) ClearCache() {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if r.objCache != nil {
+		r.objCache = make(map[objptr]*list.Element)
+	}
+	if r.cacheList != nil {
+		r.cacheList.Init()
+	}
+}
+
 type cacheEntry struct {
 	key   objptr
 	value object

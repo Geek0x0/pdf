@@ -118,6 +118,15 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 		}
 	}
 
+	// Set a reasonable object cache capacity for the Reader to prevent unlimited growth.
+	// This is crucial for batch processing where many pages are extracted sequentially.
+	// Without this, the Reader's internal objCache can grow to gigabytes for large PDFs.
+	// We use a heuristic of 10x the number of pages as most pages reference multiple objects.
+	// Only set if not already configured to allow users to override this behavior.
+	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
+		r.SetCacheCapacity(len(pages) * 10)
+	}
+
 	go func() {
 		defer close(results)
 
@@ -144,6 +153,13 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 		if fontCache != nil {
 			fontCache.Clear()
 		}
+
+		// Trigger garbage collection to free accumulated memory from batch processing.
+		// Large PDF batch processing can create significant temporary allocations
+		// that won't be cleaned up until GC runs. Explicitly calling GC here ensures
+		// memory is returned to the system promptly, preventing memory exhaustion
+		// for applications processing multiple large PDFs in sequence.
+		runtime.GC()
 	}()
 
 	return results
@@ -155,10 +171,6 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 		// Check cancellation
 		select {
 		case <-opts.Context.Done():
-			results <- BatchResult{
-				PageNum: pageNum,
-				Error:   opts.Context.Err(),
-			}
 			return
 		default:
 		}
@@ -180,10 +192,20 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 			text, err = page.GetPlainText(nil)
 		}
 
-		results <- BatchResult{
+		// CRITICAL: Clean up page font cache reference to prevent memory leaks.
+		// The page holds a reference to the cache which must be cleared after extraction.
+		// Without this, each page retains the entire fontCache in memory indefinitely.
+		page.SetFontCacheInterface(nil)
+
+		// Send result, but don't block if context is cancelled or channel is full
+		select {
+		case results <- BatchResult{
 			PageNum: pageNum,
 			Text:    text,
 			Error:   err,
+		}:
+		case <-opts.Context.Done():
+			return
 		}
 	}
 }
@@ -314,6 +336,15 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 		}
 	}
 
+	// Set a reasonable object cache capacity for the Reader to prevent unlimited growth.
+	// This is crucial for batch processing where many pages are extracted sequentially.
+	// Without this, the Reader's internal objCache can grow to gigabytes for large PDFs.
+	// We use a heuristic of 10x the number of pages as most pages reference multiple objects.
+	// Only set if not already configured to allow users to override this behavior.
+	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
+		r.SetCacheCapacity(len(pages) * 10)
+	}
+
 	go func() {
 		defer close(results)
 
@@ -333,6 +364,13 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 		}
 
 		wg.Wait()
+
+		// Trigger garbage collection to free accumulated memory from batch processing.
+		// Large PDF batch processing can create significant temporary allocations
+		// that won't be cleaned up until GC runs. Explicitly calling GC here ensures
+		// memory is returned to the system promptly, preventing memory exhaustion
+		// for applications processing multiple large PDFs in sequence.
+		runtime.GC()
 	}()
 
 	return results
@@ -343,10 +381,6 @@ func structuredBatchWorker(r *Reader, jobs <-chan int, results chan<- Structured
 	for pageNum := range jobs {
 		select {
 		case <-opts.Context.Done():
-			results <- StructuredBatchResult{
-				PageNum: pageNum,
-				Error:   opts.Context.Err(),
-			}
 			return
 		default:
 		}
@@ -354,10 +388,15 @@ func structuredBatchWorker(r *Reader, jobs <-chan int, results chan<- Structured
 		page := r.Page(pageNum)
 		blocks, err := page.ClassifyTextBlocks()
 
-		results <- StructuredBatchResult{
+		// Send result, but don't block if context is cancelled or channel is full
+		select {
+		case results <- StructuredBatchResult{
 			PageNum: pageNum,
 			Blocks:  blocks,
 			Error:   err,
+		}:
+		case <-opts.Context.Done():
+			return
 		}
 	}
 }

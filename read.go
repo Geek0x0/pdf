@@ -217,6 +217,14 @@ func (r *Reader) SetCacheCapacity(n int) {
 	}
 }
 
+// GetCacheCapacity returns the current object cache capacity.
+// Returns 0 if no capacity limit is set (unbounded cache).
+func (r *Reader) GetCacheCapacity() int {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	return r.cacheCap
+}
+
 type cacheEntry struct {
 	key   objptr
 	value object

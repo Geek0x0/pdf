@@ -50,6 +50,10 @@ type ResultCache struct {
 	// Metrics and monitoring
 	hits   int64
 	misses int64
+
+	// Cleanup control
+	stopChan chan struct{}
+	stopped  atomic.Value // bool
 }
 
 // NewResultCache creates a new result cache with specified parameters
@@ -59,11 +63,13 @@ func NewResultCache(maxSize int64, ttl time.Duration, policy string) *ResultCach
 	}
 
 	cache := &ResultCache{
-		items:   make(map[string]*CacheEntry),
-		maxSize: maxSize,
-		ttl:     ttl,
-		policy:  policy,
+		items:    make(map[string]*CacheEntry),
+		maxSize:  maxSize,
+		ttl:      ttl,
+		policy:   policy,
+		stopChan: make(chan struct{}),
 	}
+	cache.stopped.Store(false)
 
 	// Start cleanup goroutine to remove expired entries
 	go cache.cleanupExpired()
@@ -249,22 +255,31 @@ func (rc *ResultCache) cleanupExpired() {
 	ticker := time.NewTicker(5 * time.Minute) // Clean up every 5 minutes
 	defer ticker.Stop()
 
-	for range ticker.C {
-		rc.mutex.Lock()
-		removed := 0
-
-		for key, entry := range rc.items {
-			if entry.IsExpired() {
-				rc.remove(key)
-				removed++
+	for {
+		select {
+		case <-rc.stopChan:
+			return
+		case <-ticker.C:
+			if rc.stopped.Load().(bool) {
+				return
 			}
-		}
 
-		rc.mutex.Unlock()
+			rc.mutex.Lock()
+			removed := 0
 
-		// Optional: log cleanup stats if needed
-		if removed > 0 {
-			// In a real implementation, you might want to log this
+			for key, entry := range rc.items {
+				if entry.IsExpired() {
+					rc.remove(key)
+					removed++
+				}
+			}
+
+			rc.mutex.Unlock()
+
+			// Optional: log cleanup stats if needed
+			if removed > 0 {
+				// In a real implementation, you might want to log this
+			}
 		}
 	}
 }
@@ -289,6 +304,15 @@ func (rc *ResultCache) Clear() {
 	rc.items = make(map[string]*CacheEntry)
 	rc.stats.CurrentSize = 0
 	rc.stats.Entries = 0
+}
+
+// Close stops the cleanup goroutine and releases resources
+func (rc *ResultCache) Close() {
+	if rc.stopped.Load().(bool) {
+		return // Already closed
+	}
+	rc.stopped.Store(true)
+	close(rc.stopChan)
 }
 
 // GetHitRatio returns the cache hit ratio
@@ -481,31 +505,38 @@ func NewCacheContext(parent context.Context, cache *ResultCache) *CacheContext {
 		cancel: cancel,
 	}
 
-	// Set up cleanup when context is done
-	go func() {
-		<-cc.ctx.Done()
-		// Perform any necessary cleanup
-	}()
-
+	// No goroutine needed - cleanup is handled explicitly via Close()
 	return cc
 }
 
 // GetWithTimeout gets a value with timeout
 func (cc *CacheContext) GetWithTimeout(key string, timeout time.Duration) (interface{}, bool, error) {
-	done := make(chan struct{})
-	var result interface{}
-	var found bool
+	// Check context first
+	if err := cc.ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	type result struct {
+		value interface{}
+		found bool
+	}
+
+	done := make(chan result, 1)
 
 	// Launch the get operation in a goroutine
 	go func() {
-		defer close(done)
-		result, found = cc.cache.Get(key)
+		value, found := cc.cache.Get(key)
+		select {
+		case done <- result{value: value, found: found}:
+		case <-cc.ctx.Done():
+			// Context cancelled, don't send
+		}
 	}()
 
 	// Wait for either the operation to complete or timeout
 	select {
-	case <-done:
-		return result, found, nil
+	case res := <-done:
+		return res.value, res.found, nil
 	case <-time.After(timeout):
 		return nil, false, context.DeadlineExceeded
 	case <-cc.ctx.Done():

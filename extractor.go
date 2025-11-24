@@ -201,7 +201,9 @@ func (e *Extractor) extractPlainText(pages []int) (string, error) {
 func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
 	// 使用零拷贝 StringBuffer 优化性能
 	// 预估容量: 平均每页2KB
-	builder := NewStringBuffer(len(pages) * 2048)
+	estimatedSize := len(pages) * 2048
+	builder := GetSizedStringBuilder(estimatedSize)
+	defer PutSizedStringBuilder(builder, estimatedSize)
 
 	for i, pageNum := range pages {
 		select {
@@ -234,8 +236,8 @@ func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
 		}
 	}
 
-	// 使用 StringCopy 返回安全的副本（因为 builder 会被重用）
-	return builder.StringCopy(), nil
+	// 返回副本（因为 builder 会被重用）
+	return builder.String(), nil
 }
 
 // extractStyledTexts extracts styled texts from specified pages

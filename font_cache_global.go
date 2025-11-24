@@ -42,70 +42,105 @@ type cachedFont struct {
 	accessCount uint64
 }
 
-// fontAccessList implements a simple LRU list
+// fontAccessList implements a simple LRU list with O(1) operations
 type fontAccessList struct {
 	mu    sync.Mutex
-	items []*string      // keys in access order (oldest first)
-	index map[string]int // key -> index in items
+	head  *lruNode            // Most recently used
+	tail  *lruNode            // Least recently used
+	index map[string]*lruNode // key -> node
+	size  int
+}
+
+// lruNode represents a node in the doubly-linked list
+type lruNode struct {
+	key  string
+	prev *lruNode
+	next *lruNode
 }
 
 // newFontAccessList creates a new access list
 func newFontAccessList() *fontAccessList {
 	return &fontAccessList{
-		items: make([]*string, 0, 1000),
-		index: make(map[string]int),
+		index: make(map[string]*lruNode),
 	}
 }
 
-// touch marks a key as recently accessed
+// touch marks a key as recently accessed - O(1) operation
 func (fal *fontAccessList) touch(key string) {
 	fal.mu.Lock()
 	defer fal.mu.Unlock()
 
-	// Remove from current position
-	if idx, ok := fal.index[key]; ok {
-		// Move to end (most recent)
-		fal.items = append(fal.items[:idx], fal.items[idx+1:]...)
-
-		// Update indices
-		delete(fal.index, key)
-		for i := idx; i < len(fal.items); i++ {
-			fal.index[*fal.items[i]] = i
-		}
+	// If already exists, move to front
+	if node, exists := fal.index[key]; exists {
+		// Remove from current position
+		fal.removeNode(node)
+		// Add to front
+		fal.addToFront(node)
+		return
 	}
 
-	// Add to end
-	keyCopy := key
-	fal.items = append(fal.items, &keyCopy)
-	fal.index[key] = len(fal.items) - 1
+	// Create new node and add to front
+	node := &lruNode{key: key}
+	fal.index[key] = node
+	fal.addToFront(node)
+	fal.size++
 }
 
-// oldest returns the oldest key (for eviction)
+// addToFront adds a node to the front of the list
+func (fal *fontAccessList) addToFront(node *lruNode) {
+	node.next = fal.head
+	node.prev = nil
+
+	if fal.head != nil {
+		fal.head.prev = node
+	}
+	fal.head = node
+
+	if fal.tail == nil {
+		fal.tail = node
+	}
+}
+
+// removeNode removes a node from the list
+func (fal *fontAccessList) removeNode(node *lruNode) {
+	if node.prev != nil {
+		node.prev.next = node.next
+	} else {
+		fal.head = node.next
+	}
+
+	if node.next != nil {
+		node.next.prev = node.prev
+	} else {
+		fal.tail = node.prev
+	}
+}
+
+// oldest returns the oldest key (for eviction) - O(1) operation
 func (fal *fontAccessList) oldest() (string, bool) {
 	fal.mu.Lock()
 	defer fal.mu.Unlock()
 
-	if len(fal.items) == 0 {
+	if fal.tail == nil {
 		return "", false
 	}
 
-	return *fal.items[0], true
+	return fal.tail.key, true
 }
 
-// remove removes a key from tracking
+// remove removes a key from tracking - O(1) operation
 func (fal *fontAccessList) remove(key string) {
 	fal.mu.Lock()
 	defer fal.mu.Unlock()
 
-	if idx, ok := fal.index[key]; ok {
-		fal.items = append(fal.items[:idx], fal.items[idx+1:]...)
-		delete(fal.index, key)
-
-		// Update indices
-		for i := idx; i < len(fal.items); i++ {
-			fal.index[*fal.items[i]] = i
-		}
+	node, exists := fal.index[key]
+	if !exists {
+		return
 	}
+
+	fal.removeNode(node)
+	delete(fal.index, key)
+	fal.size--
 }
 
 // Global font cache instance

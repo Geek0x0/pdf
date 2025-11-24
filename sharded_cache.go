@@ -21,6 +21,10 @@ type ShardedCache struct {
 	shardMask uint64
 	maxSize   int
 	ttl       time.Duration
+
+	// 清理控制
+	stopChan chan struct{}
+	stopped  atomic.Value // bool
 }
 
 // CacheShard 代表缓存的单个分片
@@ -64,7 +68,9 @@ func NewShardedCache(maxSize int, ttl time.Duration) *ShardedCache {
 		shardMask: 255, // 256 个分片
 		maxSize:   maxSize,
 		ttl:       ttl,
+		stopChan:  make(chan struct{}),
 	}
+	sc.stopped.Store(false)
 
 	// 初始化每个分片
 	sizePerShard := maxSize / 256
@@ -77,6 +83,11 @@ func NewShardedCache(maxSize int, ttl time.Duration) *ShardedCache {
 			items:   make(map[string]*ShardedCacheEntry, sizePerShard),
 			maxSize: sizePerShard,
 		}
+	}
+
+	// 启动定期清理 goroutine
+	if ttl > 0 {
+		go sc.cleanupExpired()
 	}
 
 	return sc
@@ -311,4 +322,58 @@ func (sc *ShardedCache) Clear() {
 		atomic.StoreInt64(&shard.size, 0)
 		shard.mu.Unlock()
 	}
+}
+
+// cleanupExpired 定期清理过期条目
+func (sc *ShardedCache) cleanupExpired() {
+	ticker := time.NewTicker(5 * time.Minute) // 每5分钟清理一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sc.stopChan:
+			return
+		case <-ticker.C:
+			if sc.stopped.Load().(bool) {
+				return
+			}
+			sc.removeExpiredEntries()
+		}
+	}
+}
+
+// removeExpiredEntries 移除过期条目
+func (sc *ShardedCache) removeExpiredEntries() {
+	now := time.Now()
+	for i := 0; i < 256; i++ {
+		shard := sc.shards[i]
+		shard.mu.Lock()
+
+		var toDelete []string
+		for key, entry := range shard.items {
+			if !entry.expiration.IsZero() && now.After(entry.expiration) {
+				toDelete = append(toDelete, key)
+			}
+		}
+
+		for _, key := range toDelete {
+			if entry, ok := shard.items[key]; ok {
+				delete(shard.items, key)
+				shard.removeFromList(entry)
+				atomic.AddInt64(&shard.size, -entry.size)
+				atomic.AddUint64(&shard.evictions, 1)
+			}
+		}
+
+		shard.mu.Unlock()
+	}
+}
+
+// Close 停止清理 goroutine 并释放资源
+func (sc *ShardedCache) Close() {
+	if sc.stopped.Load().(bool) {
+		return // 已经关闭
+	}
+	sc.stopped.Store(true)
+	close(sc.stopChan)
 }

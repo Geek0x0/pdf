@@ -8,7 +8,6 @@ import (
 	"context"
 	"io"
 	"runtime"
-	"strings"
 	"sync"
 )
 
@@ -57,12 +56,13 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			workers = totalPages
 		}
 
+		// 使用足够大的缓冲防止goroutine阻塞
 		pageResults := make(chan struct {
 			pageNum int
 			text    string
 			err     error
-		}, workers)
-		workChan := make(chan int)
+		}, totalPages) // 缓冲大小改为totalPages，确保所有结果都能发送
+		workChan := make(chan int, workers) // 工作channel也加缓冲
 		var wg sync.WaitGroup
 
 		worker := func() {
@@ -77,6 +77,7 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 						err     error
 					}{pageNum: pageNum, text: "", err: ctx.Err()}:
 					default:
+						// Channel已满或已关闭
 					}
 					continue
 				default:
@@ -84,11 +85,17 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 
 				page := ar.Page(pageNum)
 				text, err := page.GetPlainText(nil)
-				pageResults <- struct {
+
+				// 使用select确保不会阻塞
+				select {
+				case pageResults <- struct {
 					pageNum int
 					text    string
 					err     error
-				}{pageNum: pageNum, text: text, err: err}
+				}{pageNum: pageNum, text: text, err: err}:
+				case <-ctx.Done():
+					// Context取消，停止发送
+				}
 			}
 		}
 
@@ -138,7 +145,16 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			return
 		}
 
-		var builder strings.Builder
+		// 计算总长度
+		totalLen := 0
+		for _, text := range pageTexts {
+			totalLen += len(text)
+		}
+
+		// 使用对象池中的builder
+		builder := GetSizedStringBuilder(totalLen + len(pageTexts))
+		defer PutSizedStringBuilder(builder, totalLen+len(pageTexts))
+
 		for _, text := range pageTexts {
 			builder.WriteString(text)
 		}
@@ -218,22 +234,34 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 				for pageNum := range workChan {
 					select {
 					case <-ctx.Done():
-						pageResults <- struct {
+						// 使用select防止阻塞
+						select {
+						case pageResults <- struct {
 							pageNum int
 							text    string
 							err     error
-						}{pageNum: pageNum, text: "", err: ctx.Err()}
+						}{pageNum: pageNum, text: "", err: ctx.Err()}:
+						default:
+							// Channel已满或已关闭
+						}
 						return
 					default:
 					}
 
 					page := ar.Page(pageNum)
 					text, err := page.GetPlainText(nil)
-					pageResults <- struct {
+
+					// 使用select确保不会阻塞
+					select {
+					case pageResults <- struct {
 						pageNum int
 						text    string
 						err     error
-					}{pageNum: pageNum, text: text, err: err}
+					}{pageNum: pageNum, text: text, err: err}:
+					case <-ctx.Done():
+						// Context取消，停止发送
+						return
+					}
 				}
 			}()
 		}
@@ -269,7 +297,16 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 			return
 		}
 
-		var builder strings.Builder
+		// 计算总长度
+		totalLen := 0
+		for _, text := range pageTexts {
+			totalLen += len(text)
+		}
+
+		// 使用对象池中的builder
+		builder := GetSizedStringBuilder(totalLen)
+		defer PutSizedStringBuilder(builder, totalLen)
+
 		for _, pageNum := range pageList {
 			builder.WriteString(pageTexts[pageNum])
 		}
@@ -304,12 +341,12 @@ func (ar *AsyncReader) AsyncExtractStructured(ctx context.Context) (<-chan []Cla
 			return
 		}
 
-		// Process each page asynchronously
+		// Process each page asynchronously - use buffered channel to prevent blocking
 		pageResults := make(chan struct {
 			pageNum int
 			blocks  []ClassifiedBlock
 			err     error
-		}, totalPages)
+		}, totalPages) // 缓冲大小等于总页数，防止goroutine阻塞
 
 		var wg sync.WaitGroup
 		for i := 1; i <= totalPages; i++ {
@@ -319,22 +356,33 @@ func (ar *AsyncReader) AsyncExtractStructured(ctx context.Context) (<-chan []Cla
 
 				select {
 				case <-ctx.Done():
-					pageResults <- struct {
+					// 使用select确保即使context取消也能发送结果
+					select {
+					case pageResults <- struct {
 						pageNum int
 						blocks  []ClassifiedBlock
 						err     error
-					}{pageNum: pageNum, blocks: nil, err: ctx.Err()}
+					}{pageNum: pageNum, blocks: nil, err: ctx.Err()}:
+					default:
+						// Channel已满或已关闭，直接返回
+					}
 					return
 				default:
 				}
 
 				page := ar.Page(pageNum)
 				blocks, err := page.ClassifyTextBlocks()
-				pageResults <- struct {
+
+				// 使用select确保发送不会阻塞
+				select {
+				case pageResults <- struct {
 					pageNum int
 					blocks  []ClassifiedBlock
 					err     error
-				}{pageNum: pageNum, blocks: blocks, err: err}
+				}{pageNum: pageNum, blocks: blocks, err: err}:
+				case <-ctx.Done():
+					// Context取消，不再发送
+				}
 			}(i)
 		}
 

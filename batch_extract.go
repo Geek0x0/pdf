@@ -121,10 +121,14 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 	// Set a reasonable object cache capacity for the Reader to prevent unlimited growth.
 	// This is crucial for batch processing where many pages are extracted sequentially.
 	// Without this, the Reader's internal objCache can grow to gigabytes for large PDFs.
-	// We use a heuristic of 10x the number of pages as most pages reference multiple objects.
+	// We use a conservative heuristic: min(5000, pages * 10) to cap maximum cache size.
 	// Only set if not already configured to allow users to override this behavior.
 	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
-		r.SetCacheCapacity(len(pages) * 10)
+		cacheSize := len(pages) * 10
+		if cacheSize > 5000 {
+			cacheSize = 5000 // Cap at 5000 objects to prevent memory explosion
+		}
+		r.SetCacheCapacity(cacheSize)
 	}
 
 	go func() {

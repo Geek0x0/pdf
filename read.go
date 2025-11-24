@@ -246,6 +246,9 @@ type cacheEntry struct {
 // Close closes the Reader and releases associated resources.
 // If the underlying ReaderAt implements io.Closer, it will be closed.
 func (r *Reader) Close() error {
+	// Clear object cache to free memory
+	r.ClearCache()
+
 	if r.closer != nil {
 		return r.closer.Close()
 	}

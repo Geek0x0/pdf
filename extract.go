@@ -24,6 +24,20 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 		return emptyReader(), nil
 	}
 
+	// Set a reasonable object cache capacity to prevent unlimited growth
+	// For concurrent page processing, limit cache to prevent memory explosion
+	if r.GetCacheCapacity() <= 0 {
+		cacheSize := len(opts.PageRange)
+		if cacheSize == 0 {
+			cacheSize = pages
+		}
+		cacheSize = cacheSize * 10
+		if cacheSize > 5000 {
+			cacheSize = 5000 // Cap at 5000 objects
+		}
+		r.SetCacheCapacity(cacheSize)
+	}
+
 	workers := opts.Workers
 	if workers <= 0 {
 		workers = runtime.NumCPU()

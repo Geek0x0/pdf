@@ -94,6 +94,17 @@ func (p *Page) SetFontCacheInterface(cache FontCacheInterface) {
 // GetPlainText returns all the text in the PDF file
 func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 	pages := r.NumPage()
+
+	// Set a reasonable object cache capacity to prevent unlimited growth
+	// For sequential page processing, limit cache to prevent memory explosion
+	if r.GetCacheCapacity() <= 0 {
+		cacheSize := pages * 10
+		if cacheSize > 5000 {
+			cacheSize = 5000 // Cap at 5000 objects
+		}
+		r.SetCacheCapacity(cacheSize)
+	}
+
 	var buf bytes.Buffer
 	fonts := make(map[string]*Font)
 	for i := 1; i <= pages; i++ {

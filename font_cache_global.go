@@ -153,6 +153,8 @@ var (
 func GetGlobalFontCache() *GlobalFontCache {
 	globalEnhancedFontCacheOnce.Do(func() {
 		globalEnhancedFontCache = NewGlobalFontCache(1000, 1*time.Hour)
+		// Start background cleanup routine to prevent memory leaks
+		globalEnhancedFontCache.StartCleanupRoutine(5 * time.Minute)
 	})
 	return globalEnhancedFontCache
 }

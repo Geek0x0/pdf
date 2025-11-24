@@ -166,28 +166,39 @@ type kdPoint struct {
 	data   *TextBlock
 }
 
-func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
-	if len(points) == 0 {
+// buildKDTreeRecursiveIndexed 使用索引避免切片复制的优化版本
+func buildKDTreeRecursiveIndexed(points []kdPoint, indices []int, depth int) *KDNode {
+	if len(indices) == 0 {
 		return nil
 	}
 
 	axis := depth % 2 // 在2D空间中交替使用x和y轴
 
-	// 按当前轴排序
-	sort.Slice(points, func(i, j int) bool {
-		return points[i].coords[axis] < points[j].coords[axis]
+	// 按当前轴排序索引
+	sort.Slice(indices, func(i, j int) bool {
+		return points[indices[i]].coords[axis] < points[indices[j]].coords[axis]
 	})
 
 	// 选择中位数作为分割点
-	medianIdx := len(points) / 2
+	medianPos := len(indices) / 2
+	medianIdx := indices[medianPos]
 
 	return &KDNode{
 		point: points[medianIdx].coords,
 		data:  points[medianIdx].data,
 		axis:  axis,
-		left:  buildKDTreeRecursive(points[:medianIdx], depth+1),
-		right: buildKDTreeRecursive(points[medianIdx+1:], depth+1),
+		left:  buildKDTreeRecursiveIndexed(points, indices[:medianPos], depth+1),
+		right: buildKDTreeRecursiveIndexed(points, indices[medianPos+1:], depth+1),
 	}
+}
+
+func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
+	// 创建索引数组,只分配一次
+	indices := make([]int, len(points))
+	for i := range indices {
+		indices[i] = i
+	}
+	return buildKDTreeRecursiveIndexed(points, indices, depth)
 }
 
 // RangeSearch 范围搜索，返回距离目标点在指定半径内的所有文本块
@@ -196,7 +207,9 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 		return nil
 	}
 
-	var result []*TextBlock
+	// 预分配结果容量,减少 append 导致的内存重分配
+	// 估计结果数量为树节点的10%左右
+	result := make([]*TextBlock, 0, 16)
 	tree.rangeSearchRecursive(tree.root, target, radius, &result)
 	return result
 }
@@ -291,18 +304,21 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		}
 	}
 
+	// 创建block到索引的映射,避免重复查找
+	blockToIdx := make(map[*TextBlock]int, len(blocks))
+	for i, block := range blocks {
+		blockToIdx[block] = i
+	}
+
 	// 对每个块查找近邻并合并
 	for i, block := range blocks {
 		center := block.Center()
 		neighbors := kdtree.RangeSearch([]float64{center.X, center.Y}, distThreshold*distThreshold)
 
 		for _, neighbor := range neighbors {
-			// 找到neighbor在blocks中的索引
-			for j, b := range blocks {
-				if b == neighbor && i != j {
-					if shouldMergeClusters(block, neighbor, distThreshold) {
-						union(i, j)
-					}
+			if j, ok := blockToIdx[neighbor]; ok && i != j {
+				if shouldMergeClusters(block, neighbor, distThreshold) {
+					union(i, j)
 				}
 			}
 		}

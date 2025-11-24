@@ -503,8 +503,10 @@ func sortWithinBlock(texts []Text) []Text {
 
 	// 直接在原切片上排序，避免拷贝
 	// Sort by Y first (top to bottom)
+	// 优化：使用缓存的 Y 值比较减少浮点运算
 	sort.Slice(texts, func(i, j int) bool {
-		if math.Abs(texts[i].Y-texts[j].Y) > lineTolerance {
+		deltaY := texts[i].Y - texts[j].Y
+		if deltaY > lineTolerance || deltaY < -lineTolerance {
 			return texts[i].Y > texts[j].Y
 		}
 		return texts[i].X < texts[j].X
@@ -578,8 +580,14 @@ func SmartTextRunsToPlain(texts []Text) string {
 	}
 
 	// Build output with proper spacing
-	// 预估总长度：每个文本平均5个字符 + 空格和换行
-	estimatedLen := len(ordered)*5 + len(lines)
+	// 改进容量预估：统计实际文本长度而非固定估算
+	estimatedLen := 0
+	for _, line := range lines {
+		for _, t := range line {
+			estimatedLen += len(t.S) + 1 // 文本长度 + 空格
+		}
+		estimatedLen += 1 // 换行符
+	}
 	var builder strings.Builder
 	builder.Grow(estimatedLen)
 

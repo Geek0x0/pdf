@@ -498,21 +498,20 @@ func sortWithinBlock(texts []Text) []Text {
 	}
 
 	const lineTolerance = 3.0
-	var lines []line
+	// 预分配lines容量，估计行数为文本数的1/10
+	lines := make([]line, 0, len(texts)/10+1)
 
-	sorted := make([]Text, len(texts))
-	copy(sorted, texts)
-
+	// 直接在原切片上排序，避免拷贝
 	// Sort by Y first (top to bottom)
-	sort.Slice(sorted, func(i, j int) bool {
-		if math.Abs(sorted[i].Y-sorted[j].Y) > lineTolerance {
-			return sorted[i].Y > sorted[j].Y
+	sort.Slice(texts, func(i, j int) bool {
+		if math.Abs(texts[i].Y-texts[j].Y) > lineTolerance {
+			return texts[i].Y > texts[j].Y
 		}
-		return sorted[i].X < sorted[j].X
+		return texts[i].X < texts[j].X
 	})
 
 	// Group into lines
-	for _, t := range sorted {
+	for _, t := range texts {
 		placed := false
 		for i := range lines {
 			if math.Abs(t.Y-lines[i].y) <= lineTolerance {
@@ -526,8 +525,9 @@ func sortWithinBlock(texts []Text) []Text {
 		}
 	}
 
-	// Sort each line left-to-right
-	var result []Text
+	// Sort each line left-to-right and flatten
+	// 预分配result，复用texts切片避免新分配
+	result := texts[:0]
 	for _, l := range lines {
 		sort.Slice(l.texts, func(i, j int) bool {
 			return l.texts[i].X < l.texts[j].X
@@ -549,13 +549,15 @@ func SmartTextRunsToPlain(texts []Text) string {
 
 	// Group into lines for formatting
 	const lineTolerance = 3.0
-	var lines [][]Text
-	var currentLine []Text
+	// 预分配lines容量，估计行数为文本数的1/10
+	lines := make([][]Text, 0, len(ordered)/10+1)
+	// 预分配currentLine容量
+	currentLine := make([]Text, 0, 10)
 	var currentY float64
 
 	for i, t := range ordered {
 		if i == 0 {
-			currentLine = []Text{t}
+			currentLine = append(currentLine, t)
 			currentY = t.Y
 			continue
 		}
@@ -566,7 +568,8 @@ func SmartTextRunsToPlain(texts []Text) string {
 			if len(currentLine) > 0 {
 				lines = append(lines, currentLine)
 			}
-			currentLine = []Text{t}
+			currentLine = make([]Text, 0, 10)
+			currentLine = append(currentLine, t)
 			currentY = t.Y
 		}
 	}
@@ -575,7 +578,11 @@ func SmartTextRunsToPlain(texts []Text) string {
 	}
 
 	// Build output with proper spacing
+	// 预估总长度：每个文本平均5个字符 + 空格和换行
+	estimatedLen := len(ordered)*5 + len(lines)
 	var builder strings.Builder
+	builder.Grow(estimatedLen)
+
 	for i, line := range lines {
 		appendLine(&builder, line)
 		if i < len(lines)-1 {

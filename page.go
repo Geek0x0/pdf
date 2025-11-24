@@ -1571,6 +1571,15 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 	n := 0
 	decoded := enc.Decode(s)
 	vertical := g.Tf.writingMode() == 1
+
+	// 预分配text切片容量，避免多次扩容
+	if cap(ce.text)-len(ce.text) < len(decoded) {
+		newCap := len(ce.text) + len(decoded) + 64 // 额外预留64个位置
+		newText := make([]Text, len(ce.text), newCap)
+		copy(newText, ce.text)
+		ce.text = newText
+	}
+
 	for _, ch := range decoded {
 		var w0 float64
 		if n < len(s) {
@@ -1585,6 +1594,7 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 
 		Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
 		bold, italic, underline := parseFontStyles(f)
+		// 减少string(ch)的内存分配，直接使用decoded字符串
 		ce.text = append(ce.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch), vertical, bold, italic, underline})
 
 		tx := w0/1000*g.Tfs + g.Tc

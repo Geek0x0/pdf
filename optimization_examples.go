@@ -333,8 +333,14 @@ func mergeTextBlocks(blocks []*TextBlock) *TextBlock {
 		return blocks[0]
 	}
 
+	// 预先计算总文本数量，一次性分配
+	totalTexts := 0
+	for _, block := range blocks {
+		totalTexts += len(block.Texts)
+	}
+
 	merged := &TextBlock{
-		Texts:       make([]Text, 0),
+		Texts:       make([]Text, 0, totalTexts),
 		MinX:        blocks[0].MinX,
 		MaxX:        blocks[0].MaxX,
 		MinY:        blocks[0].MinY,
@@ -343,7 +349,6 @@ func mergeTextBlocks(blocks []*TextBlock) *TextBlock {
 	}
 
 	totalFontSize := 0.0
-	totalTexts := 0
 
 	for _, block := range blocks {
 		merged.Texts = append(merged.Texts, block.Texts...)

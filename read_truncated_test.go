@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// 确认截断的 xref 不会触发 panic，而是返回可处理的错误。
+// Ensure truncated xref does not trigger panic, but returns a handleable error.
 func TestNewReaderTruncatedXrefNoPanic(t *testing.T) {
-	data := []byte("%PDF-1.4\nxref\n0 1\n") // 故意截断的 xref 表
+	data := []byte("%PDF-1.4\nxref\n0 1\n") // intentionally truncated xref table
 	data = append(data, []byte("startxref\n0\n%%EOF")...)
 
 	defer func() {

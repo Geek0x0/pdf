@@ -470,11 +470,11 @@ func buildLineText(texts []Text) string {
 		}
 	}
 
-	// P0优化: 使用strings.Builder代替字符串拼接
+	// P0 optimization: use strings.Builder instead of string concatenation
 	builder := GetBuilder()
 	defer PutBuilder(builder)
 
-	// 预估容量
+	// Estimate capacity
 	totalLen := 0
 	for _, t := range sortedTexts {
 		totalLen += len(t.S)

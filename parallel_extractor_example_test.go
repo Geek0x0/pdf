@@ -11,18 +11,18 @@ import (
 	"time"
 )
 
-// TestParallelExtractorUsage 演示 ParallelExtractor 的实际用法
+// TestParallelExtractorUsage demonstrates actual usage of ParallelExtractor
 func TestParallelExtractorUsage(t *testing.T) {
-	// 创建一个并行提取器（使用 4 个工作协程）
+	// Create a parallel extractor (using 4 worker goroutines)
 	extractor := NewParallelExtractor(4)
 	defer extractor.Close()
 
-	// 验证提取器创建成功
+	// Verify extractor creation succeeded
 	if extractor == nil {
 		t.Fatal("Failed to create ParallelExtractor")
 	}
 
-	// 验证组件初始化
+	// Verify component initialization
 	if extractor.processor == nil {
 		t.Error("Processor not initialized")
 	}
@@ -33,7 +33,7 @@ func TestParallelExtractorUsage(t *testing.T) {
 		t.Error("Prefetcher not initialized")
 	}
 
-	// 测试统计信息获取
+	// Test statistics retrieval
 	cacheStats := extractor.GetCacheStats()
 	if cacheStats.Hits < 0 || cacheStats.Misses < 0 {
 		t.Error("Invalid cache stats")
@@ -45,13 +45,13 @@ func TestParallelExtractorUsage(t *testing.T) {
 	}
 }
 
-// TestReaderExtractAllPagesParallel 演示 Reader 的并行提取方法
+// TestReaderExtractAllPagesParallel demonstrates Reader's parallel extraction method
 func TestReaderExtractAllPagesParallel(t *testing.T) {
-	// 注意：这个测试需要一个实际的 PDF 文件
-	// 在实际使用中，你需要提供一个有效的 PDF 路径
+	// Note: this test requires an actual PDF file
+	// In actual usage, you need to provide a valid PDF path
 	t.Skip("Skipping test that requires actual PDF file")
 
-	// 示例代码：
+	// Example code:
 	/*
 		f, r, err := Open("sample.pdf")
 		if err != nil {
@@ -59,39 +59,39 @@ func TestReaderExtractAllPagesParallel(t *testing.T) {
 		}
 		defer f.Close()
 
-		// 创建上下文（带超时）
+		// Create context (with timeout)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// 使用并行提取器提取所有页面
-		// workers=0 表示自动使用 runtime.NumCPU()
+		// Use parallel extractor to extract all pages
+		// workers=0 means automatically use runtime.NumCPU()
 		pages, err := r.ExtractAllPagesParallel(ctx, 0)
 		if err != nil {
 			t.Fatalf("Failed to extract pages: %v", err)
 		}
 
-		// 处理结果
+		// Process results
 		for i, text := range pages {
 			fmt.Printf("Page %d: %d characters\n", i+1, len(text))
 		}
 	*/
 }
 
-// ExampleParallelExtractor_basic 基本使用示例
+// ExampleParallelExtractor_basic basic usage example
 func ExampleParallelExtractor_basic() {
-	// 创建并行提取器
-	extractor := NewParallelExtractor(4) // 使用 4 个工作协程
+	// Create parallel extractor
+	extractor := NewParallelExtractor(4) // use 4 worker goroutines
 	defer extractor.Close()
 
-	// 注意：实际使用需要创建 Page 对象
+	// Note: actual usage requires creating Page objects
 	// pages := []Page{...}
 
 	ctx := context.Background()
 
-	// 模拟空页面列表
+	// Simulate empty page list
 	var pages []Page
 
-	// 提取所有页面
+	// Extract all pages
 	results, err := extractor.ExtractAllPages(ctx, pages)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -102,39 +102,39 @@ func ExampleParallelExtractor_basic() {
 	// Output: Extracted 0 pages
 }
 
-// ExampleReader_ExtractAllPagesParallel 使用 Reader 的并行提取方法
+// ExampleReader_ExtractAllPagesParallel uses Reader's parallel extraction method
 func ExampleReader_ExtractAllPagesParallel() {
-	// 注意：这个示例需要实际的 PDF 文件
-	// 这里仅展示 API 用法
+	// Note: this example requires actual PDF files
+	// Here only shows API usage
 
 	/*
-		// 打开 PDF 文件
+		// Open PDF file
 		f, r, err := Open("document.pdf")
 		if err != nil {
 			panic(err)
 		}
 		defer f.Close()
 
-		// 创建上下文
+		// Create context
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer cancel()
 
-		// 并行提取所有页面文本
-		pages, err := r.ExtractAllPagesParallel(ctx, 0) // 0 = 自动检测 CPU 核心数
+		// Parallel extract all page texts
+		pages, err := r.ExtractAllPagesParallel(ctx, 0) // 0 = auto-detect CPU core count
 		if err != nil {
 			panic(err)
 		}
 
-		// 输出每页的文本
+		// Output text for each page
 		for i, pageText := range pages {
 			fmt.Printf("Page %d has %d characters\n", i+1, len(pageText))
 		}
 	*/
 }
 
-// BenchmarkParallelExtractorVsSequential 对比并行和顺序提取性能
+// BenchmarkParallelExtractorVsSequential compare performance of parallel and sequential extraction
 func BenchmarkParallelExtractorVsSequential(b *testing.B) {
-	// 创建模拟页面
+	// Create simulated pages
 	numPages := 100
 	pages := make([]Page, numPages)
 
@@ -169,7 +169,7 @@ func BenchmarkParallelExtractorVsSequential(b *testing.B) {
 
 	b.Run("Parallel-AutoWorkers", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			extractor := NewParallelExtractor(0) // 自动检测
+			extractor := NewParallelExtractor(0) // auto-detect
 			ctx := context.Background()
 			_, _ = extractor.ExtractAllPages(ctx, pages)
 			extractor.Close()
@@ -177,59 +177,59 @@ func BenchmarkParallelExtractorVsSequential(b *testing.B) {
 	})
 }
 
-// TestParallelExtractorCancellation 测试取消功能
+// TestParallelExtractorCancellation test cancellation functionality
 func TestParallelExtractorCancellation(t *testing.T) {
 	extractor := NewParallelExtractor(4)
 	defer extractor.Close()
 
-	// 创建可取消的上下文
+	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 立即取消
+	// Cancel immediately
 	cancel()
 
-	// 尝试提取（应该快速失败）
+	// Try to extract (should fail quickly)
 	pages := make([]Page, 10)
 	_, err := extractor.ExtractAllPages(ctx, pages)
 
-	// 应该返回取消错误
+	// Should return cancellation error
 	if err != context.Canceled {
 		t.Errorf("Expected context.Canceled error, got: %v", err)
 	}
 }
 
-// TestParallelExtractorTimeout 测试超时功能
+// TestParallelExtractorTimeout test timeout functionality
 func TestParallelExtractorTimeout(t *testing.T) {
 	extractor := NewParallelExtractor(2)
 	defer extractor.Close()
 
-	// 创建带超时的上下文
+	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 
-	// 等待超时
+	// Wait for timeout
 	time.Sleep(10 * time.Millisecond)
 
-	// 尝试提取（应该超时）
+	// Try to extract (should timeout)
 	pages := make([]Page, 10)
 	_, err := extractor.ExtractAllPages(ctx, pages)
 
-	// 应该返回超时错误
+	// Should return timeout error
 	if err != context.DeadlineExceeded {
 		t.Errorf("Expected context.DeadlineExceeded error, got: %v", err)
 	}
 }
 
-// TestParallelExtractorStats 测试统计信息收集
+// TestParallelExtractorStats test statistics collection
 func TestParallelExtractorStats(t *testing.T) {
 	extractor := NewParallelExtractor(4)
 	defer extractor.Close()
 
-	// 获取初始统计
+	// Get initial statistics
 	cacheStats := extractor.GetCacheStats()
 	prefetchStats := extractor.GetPrefetchStats()
 
-	// 验证统计结构
+	// Verify statistics structure
 	if cacheStats.Hits != 0 {
 		t.Errorf("Expected 0 initial hits, got %d", cacheStats.Hits)
 	}

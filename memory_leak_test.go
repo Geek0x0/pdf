@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// MemoryProfile 记录内存使用情况
+// MemoryProfile records memory usage
 type MemoryProfile struct {
 	Timestamp  time.Time
 	Alloc      uint64
@@ -18,7 +18,7 @@ type MemoryProfile struct {
 	Goroutines int
 }
 
-// RecordMemory 记录当前内存状态
+// RecordMemory records current memory state
 func RecordMemory(label string) MemoryProfile {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -34,7 +34,7 @@ func RecordMemory(label string) MemoryProfile {
 	}
 }
 
-// MemoryDifference 计算两次记录间的差异
+// MemoryDifference calculates difference between two records
 func MemoryDifference(before, after MemoryProfile) {
 	allocDiff := int64(after.Alloc) - int64(before.Alloc)
 	fmt.Printf("  Memory Delta: %+v MB (%.2f%% change)\n",
@@ -43,40 +43,40 @@ func MemoryDifference(before, after MemoryProfile) {
 	fmt.Printf("  GC Events: %v (before) -> %v (after)\n", before.NumGC, after.NumGC)
 }
 
-// TestFontCacheReferenceCleanup 验证 fontCache 引用清理
+// TestFontCacheReferenceCleanup verifies fontCache reference cleanup
 func TestFontCacheReferenceCleanup(t *testing.T) {
 	t.Log("Test: FontCache Reference Cleanup")
 
-	// 模拟 fontCache
+	// Simulate fontCache
 	fontCache := make(map[string]interface{})
 
-	// 模拟 Page 结构
+	// Simulate Page structure
 	type mockPage struct {
 		fontCache map[string]interface{}
 	}
 
 	start := RecordMemory("初始")
 
-	// 模拟处理 500 页（问题场景）
+	// Simulate processing 500 pages (problem scenario)
 	for page := 0; page < 500; page++ {
 		p := mockPage{fontCache: fontCache}
 
-		// 添加字体到缓存
+		// Add fonts to cache
 		for i := 0; i < 50; i++ {
 			fontCache[fmt.Sprintf("font_%d", page*50+i)] = make([]byte, 4096)
 		}
 
-		// 【关键修复】清理引用
+		// [Critical fix] Clean up references
 		p.fontCache = nil
 
-		// 防止优化器消除
+		// Prevent optimizer elimination
 		_ = p
 	}
 
 	middle := RecordMemory("处理后")
 	MemoryDifference(start, middle)
 
-	// 清理
+	// Clean up
 	fontCache = make(map[string]interface{})
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
@@ -85,11 +85,11 @@ func TestFontCacheReferenceCleanup(t *testing.T) {
 	MemoryDifference(middle, end)
 }
 
-// TestObjCacheCapacityLimit 验证 objCache 容量限制
+// TestObjCacheCapacityLimit verifies objCache capacity limit
 func TestObjCacheCapacityLimit(t *testing.T) {
 	t.Log("Test: ObjCache Capacity Limiting")
 
-	// 无容量限制（问题）
+	// No capacity limit (problem)
 	t.Log("Scenario A: No capacity limit")
 	cacheNoLimit := make(map[int][]byte)
 	start1 := RecordMemory("无限制-初始")
@@ -101,7 +101,7 @@ func TestObjCacheCapacityLimit(t *testing.T) {
 	end1 := RecordMemory("无限制-添加50000项")
 	MemoryDifference(start1, end1)
 
-	// 有容量限制（修复）
+	// With capacity limit (fix)
 	t.Log("Scenario B: With capacity limit")
 	cacheWithLimit := make(map[int][]byte)
 	const maxCap = 5000
@@ -109,7 +109,7 @@ func TestObjCacheCapacityLimit(t *testing.T) {
 
 	for i := 0; i < 50000; i++ {
 		cacheWithLimit[i] = make([]byte, 1024)
-		// 超过容量则移除旧项
+		// Remove old items when exceeding capacity
 		if len(cacheWithLimit) > maxCap {
 			delete(cacheWithLimit, i-maxCap)
 		}
@@ -118,20 +118,20 @@ func TestObjCacheCapacityLimit(t *testing.T) {
 	end2 := RecordMemory("有限制-添加50000项")
 	MemoryDifference(start2, end2)
 
-	// 对比
+	// Comparison
 	t.Logf("无限制缓存项数: %d", len(cacheNoLimit))
 	t.Logf("有限制缓存项数: %d (容量: %d)", len(cacheWithLimit), maxCap)
 }
 
-// TestPeriodicGCImpact 验证定期 GC 的影响
+// TestPeriodicGCImpact verifies impact of periodic GC
 func TestPeriodicGCImpact(t *testing.T) {
 	t.Log("Test: Periodic GC Impact")
 
-	// 禁用自动 GC
-	oldPercent := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(oldPercent)
+	// Disable automatic GC
+	oldGCPercent := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(oldGCPercent)
 
-	// 场景 A：无 GC
+	// Scenario A: Without GC
 	t.Log("Scenario A: Without GC")
 	data1 := make([][]byte, 0)
 	start1 := RecordMemory("无GC-初始")
@@ -143,7 +143,7 @@ func TestPeriodicGCImpact(t *testing.T) {
 	end1 := RecordMemory("无GC-分配50000项")
 	MemoryDifference(start1, end1)
 
-	// 场景 B：有定期 GC
+	// Scenario B: With periodic GC
 	t.Log("Scenario B: With periodic GC")
 	data2 := make([][]byte, 0)
 	start2 := RecordMemory("有GC-初始")
@@ -151,7 +151,7 @@ func TestPeriodicGCImpact(t *testing.T) {
 	for i := 0; i < 50000; i++ {
 		data2 = append(data2, make([]byte, 1024))
 		if i%5000 == 0 && i > 0 {
-			runtime.GC() // 定期 GC
+			runtime.GC() // Periodic GC
 		}
 	}
 
@@ -159,22 +159,22 @@ func TestPeriodicGCImpact(t *testing.T) {
 	MemoryDifference(start2, end2)
 }
 
-// TestBatchExtractMemoryManagement 验证批处理内存管理
+// TestBatchExtractMemoryManagement verifies batch processing memory management
 func TestBatchExtractMemoryManagement(t *testing.T) {
 	t.Log("Test: Batch Extract Memory Management")
 
-	// 如果有测试 PDF，可以运行实际的批处理测试
-	// 这里仅展示测试框架
+	// If there is a test PDF, can run actual batch processing test
+	// Here only shows the test framework
 
 	start := RecordMemory("批处理-初始")
 
-	// 模拟批处理逻辑
-	// 实际用法：
+	// Simulate batch processing logic
+	// Actual usage:
 	// opts := BatchExtractOptions{Workers: 4, UseFontCache: true}
 	// results := reader.ExtractPagesBatch(opts)
 	// for range results { }
 
-	// 清理
+	// Clean up
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
 
@@ -227,9 +227,9 @@ func TestExtractPagesBatchMemoryLeak(t *testing.T) {
 	// Memory should not grow significantly after multiple iterations
 	// Allow up to 50MB growth for test overhead
 	if growthMB > 50 {
-		t.Errorf("内存泄漏检测到: 增长 %d MB (期望 < 50 MB)", growthMB)
+		t.Errorf("Memory leak detected: growth %d MB (expected < 50 MB)", growthMB)
 	} else {
-		t.Logf("内存管理正常: 增长仅 %d MB", growthMB)
+		t.Logf("Memory management normal: growth only %d MB", growthMB)
 	}
 }
 
@@ -305,7 +305,7 @@ func mockCacheUsage(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-// BenchmarkWithCapacityLimit 基准测试：有容量限制
+// BenchmarkWithCapacityLimit benchmark test: with capacity limit
 func BenchmarkWithCapacityLimit(b *testing.B) {
 	const maxCap = 500
 	for i := 0; i < b.N; i++ {

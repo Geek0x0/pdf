@@ -11,15 +11,15 @@ import (
 	"sync/atomic"
 )
 
-// EnhancedParallelProcessor 增强的并行处理器
-// 提供更好的并发控制、负载均衡和错误处理
+// EnhancedParallelProcessor enhanced parallel processor
+// Provides better concurrency control, load balancing, and error handling
 type EnhancedParallelProcessor struct {
 	workerPool     *WorkerPool
 	batchSize      int
 	enablePrefetch bool
 }
 
-// WorkerPool 工作池
+// WorkerPool worker pool
 type WorkerPool struct {
 	workers    int
 	semaphore  chan struct{}
@@ -27,7 +27,7 @@ type WorkerPool struct {
 	totalJobs  int64
 }
 
-// NewEnhancedParallelProcessor 创建增强的并行处理器
+// NewEnhancedParallelProcessor creates enhanced parallel processor
 func NewEnhancedParallelProcessor(workers int, batchSize int) *EnhancedParallelProcessor {
 	if workers <= 0 {
 		workers = runtime.NumCPU()
@@ -46,7 +46,7 @@ func NewEnhancedParallelProcessor(workers int, batchSize int) *EnhancedParallelP
 	}
 }
 
-// ProcessPagesEnhanced 增强的并行页面处理
+// ProcessPagesEnhanced processes pages in parallel with enhancements
 func (epp *EnhancedParallelProcessor) ProcessPagesEnhanced(
 	ctx context.Context,
 	pages []Page,
@@ -56,7 +56,7 @@ func (epp *EnhancedParallelProcessor) ProcessPagesEnhanced(
 		return [][]Text{}, nil
 	}
 
-	// 使用批处理减少调度开销
+	// Use batching to reduce scheduling overhead
 	numBatches := (len(pages) + epp.batchSize - 1) / epp.batchSize
 	results := make([][]Text, len(pages))
 	var processingErr error
@@ -75,7 +75,7 @@ func (epp *EnhancedParallelProcessor) ProcessPagesEnhanced(
 		go func(bStart, bEnd int) {
 			defer wg.Done()
 
-			// 获取工作许可
+			// Acquire work permit
 			select {
 			case epp.workerPool.semaphore <- struct{}{}:
 				defer func() { <-epp.workerPool.semaphore }()
@@ -87,7 +87,7 @@ func (epp *EnhancedParallelProcessor) ProcessPagesEnhanced(
 			atomic.AddInt64(&epp.workerPool.activeJobs, 1)
 			defer atomic.AddInt64(&epp.workerPool.activeJobs, -1)
 
-			// 处理批次中的页面
+			// Process pages in the batch
 			for i := bStart; i < bEnd; i++ {
 				select {
 				case <-ctx.Done():
@@ -116,7 +116,7 @@ func (epp *EnhancedParallelProcessor) ProcessPagesEnhanced(
 	return results, nil
 }
 
-// ProcessWithLoadBalancing 带负载均衡的处理
+// ProcessWithLoadBalancing processes with load balancing
 func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 	ctx context.Context,
 	pages []Page,
@@ -131,7 +131,7 @@ func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 		numWorkers = len(pages)
 	}
 
-	// 使用动态工作窃取
+	// Use dynamic work stealing
 	type job struct {
 		index int
 		page  Page
@@ -143,10 +143,10 @@ func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 		err   error
 	}
 
-	jobChan := make(chan job, numWorkers*2) // 缓冲以减少阻塞
+	jobChan := make(chan job, numWorkers*2) // Buffer to reduce blocking
 	resultChan := make(chan result, len(pages))
 
-	// 启动工作协程
+	// Start worker goroutines
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
@@ -171,7 +171,7 @@ func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 		}(i)
 	}
 
-	// 分发任务
+	// Distribute tasks
 	go func() {
 		defer close(jobChan)
 		for i, page := range pages {
@@ -183,13 +183,13 @@ func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 		}
 	}()
 
-	// 等待所有工作完成
+	// Wait for all work to complete
 	go func() {
 		wg.Wait()
 		close(resultChan)
 	}()
 
-	// 收集结果
+	// Collect results
 	results := make([][]Text, len(pages))
 	var firstErr error
 	for res := range resultChan {
@@ -206,7 +206,7 @@ func (epp *EnhancedParallelProcessor) ProcessWithLoadBalancing(
 	return results, nil
 }
 
-// ProcessWithPipeline 管道式处理
+// ProcessWithPipeline processes with pipeline
 func (epp *EnhancedParallelProcessor) ProcessWithPipeline(
 	ctx context.Context,
 	pages []Page,
@@ -216,13 +216,13 @@ func (epp *EnhancedParallelProcessor) ProcessWithPipeline(
 		return [][]Text{}, nil
 	}
 
-	// 初始阶段：提取文本
+	// Initial stage: extract text
 	currentResults := make([][]Text, len(pages))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var pipelineErr error
 
-	// 第一个阶段：并行处理所有页面
+	// First stage: process all pages in parallel
 	semaphore := make(chan struct{}, epp.workerPool.workers)
 
 	for i, page := range pages {
@@ -242,11 +242,11 @@ func (epp *EnhancedParallelProcessor) ProcessWithPipeline(
 				return
 			}
 
-			// 初始处理
+			// Initial processing
 			var texts []Text
 			var err error
 
-			// 执行所有阶段
+			// Execute all stages
 			for _, stage := range stages {
 				texts, err = stage(p, texts)
 				if err != nil {
@@ -274,8 +274,8 @@ func (epp *EnhancedParallelProcessor) ProcessWithPipeline(
 	return currentResults, nil
 }
 
-// AdaptiveProcessor 自适应处理器
-// 根据系统负载自动调整并发级别
+// AdaptiveProcessor adaptive processor
+// Automatically adjusts concurrency level based on system load
 type AdaptiveProcessor struct {
 	minWorkers     int
 	maxWorkers     int
@@ -283,7 +283,7 @@ type AdaptiveProcessor struct {
 	loadThreshold  float64
 }
 
-// NewAdaptiveProcessor 创建自适应处理器
+// NewAdaptiveProcessor creates adaptive processor
 func NewAdaptiveProcessor(min, max int) *AdaptiveProcessor {
 	if min <= 0 {
 		min = 1
@@ -302,44 +302,44 @@ func NewAdaptiveProcessor(min, max int) *AdaptiveProcessor {
 	return ap
 }
 
-// AdjustWorkers 根据系统负载调整工作数
+// AdjustWorkers adjusts worker count based on system load
 func (ap *AdaptiveProcessor) AdjustWorkers() {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	// 简化的负载评估：基于 GC 暂停时间
+	// Simplified load assessment: based on GC pause time
 	current := ap.currentWorkers.Load()
 
-	// 如果系统压力大，减少工作协程
+	// If system pressure is high, reduce worker goroutines
 	if ms.NumGC > 0 {
 		if current > int32(ap.minWorkers) {
 			ap.currentWorkers.Store(current - 1)
 		}
 	} else if current < int32(ap.maxWorkers) {
-		// 系统空闲，增加工作协程
+		// System idle, increase worker goroutines
 		ap.currentWorkers.Store(current + 1)
 	}
 }
 
-// GetWorkerCount 获取当前工作协程数
+// GetWorkerCount gets current worker goroutine count
 func (ap *AdaptiveProcessor) GetWorkerCount() int {
 	return int(ap.currentWorkers.Load())
 }
 
-// ProcessAdaptive 自适应处理
+// ProcessAdaptive processes adaptively
 func (ap *AdaptiveProcessor) ProcessAdaptive(
 	ctx context.Context,
 	pages []Page,
 	processorFunc func(Page) ([]Text, error),
 ) ([][]Text, error) {
-	// 定期调整工作数
+	// Periodically adjust worker count
 	ap.AdjustWorkers()
 
 	epp := NewEnhancedParallelProcessor(ap.GetWorkerCount(), 10)
 	return epp.ProcessPagesEnhanced(ctx, pages, processorFunc)
 }
 
-// GetStats 获取工作池统计信息
+// GetStats gets worker pool statistics
 func (wp *WorkerPool) GetStats() WorkerPoolStats {
 	return WorkerPoolStats{
 		Workers:    wp.workers,
@@ -348,22 +348,22 @@ func (wp *WorkerPool) GetStats() WorkerPoolStats {
 	}
 }
 
-// WorkerPoolStats 工作池统计信息
+// WorkerPoolStats worker pool statistics
 type WorkerPoolStats struct {
 	Workers    int
 	ActiveJobs int64
 	TotalJobs  int64
 }
 
-// ParallelExtractor 并行提取器
-// 结合所有优化的高级提取接口
+// ParallelExtractor parallel extractor
+// Advanced extraction interface combining all optimizations
 type ParallelExtractor struct {
 	processor  *EnhancedParallelProcessor
 	cache      *ShardedCache
 	prefetcher *FontPrefetcher
 }
 
-// NewParallelExtractor 创建并行提取器
+// NewParallelExtractor creates parallel extractor
 func NewParallelExtractor(workers int) *ParallelExtractor {
 	return &ParallelExtractor{
 		processor:  NewEnhancedParallelProcessor(workers, 10),
@@ -372,29 +372,29 @@ func NewParallelExtractor(workers int) *ParallelExtractor {
 	}
 }
 
-// ExtractAllPages 提取所有页面（使用所有优化）
+// ExtractAllPages extracts all pages (using all optimizations)
 func (pe *ParallelExtractor) ExtractAllPages(
 	ctx context.Context,
 	pages []Page,
 ) ([][]Text, error) {
 	return pe.processor.ProcessPagesEnhanced(ctx, pages, func(page Page) ([]Text, error) {
-		// 使用缓存加速内容提取
+		// Use cache to accelerate content extraction
 		content := page.Content()
 		return content.Text, nil
 	})
 }
 
-// GetCacheStats 获取缓存统计
+// GetCacheStats gets cache statistics
 func (pe *ParallelExtractor) GetCacheStats() ShardedCacheStats {
 	return pe.cache.GetStats()
 }
 
-// GetPrefetchStats 获取预取统计
+// GetPrefetchStats gets prefetch statistics
 func (pe *ParallelExtractor) GetPrefetchStats() PrefetchStats {
 	return pe.prefetcher.GetStats()
 }
 
-// Close 关闭并清理资源
+// Close closes and cleans up resources
 func (pe *ParallelExtractor) Close() {
 	pe.prefetcher.Close()
 }

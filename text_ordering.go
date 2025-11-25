@@ -72,22 +72,22 @@ func smartTextOrdering(texts []Text) []Text {
 
 // clusterTextBlocks groups nearby texts into coherent blocks
 // using a simplified distance-based clustering approach
-// P1优化: 使用KD-Tree加速聚类，从O(n²)优化到O(n log n)
+// P1 optimization: Use KD-Tree to accelerate clustering, optimize from O(n²) to O(n log n)
 func clusterTextBlocks(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
 	}
 
-	// 对于小数据集，使用简单方法（调优后阈值：200）
+	// For small datasets, use simple method (threshold after tuning: 200)
 	if len(texts) < 200 {
 		return clusterTextBlocksSimple(texts)
 	}
 
-	// 对于大数据集，使用优化的KD-Tree方法
+	// For large datasets, use optimized KD-Tree method
 	return ClusterTextBlocksOptimized(texts)
 }
 
-// clusterTextBlocksSimple 简单聚类方法（用于小数据集）
+// clusterTextBlocksSimple Simple clustering method (for small datasets)
 func clusterTextBlocksSimple(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
@@ -498,12 +498,12 @@ func sortWithinBlock(texts []Text) []Text {
 	}
 
 	const lineTolerance = 3.0
-	// 预分配lines容量，估计行数为文本数的1/10
+	// Pre-allocate lines capacity, estimate number of lines as 1/10 of text count
 	lines := make([]line, 0, len(texts)/10+1)
 
-	// 直接在原切片上排序，避免拷贝
+	// Sort directly on original slice, avoid copying
 	// Sort by Y first (top to bottom)
-	// 优化：使用缓存的 Y 值比较减少浮点运算
+	// Optimization: Use cached Y value comparison to reduce floating point operations
 	sort.Slice(texts, func(i, j int) bool {
 		deltaY := texts[i].Y - texts[j].Y
 		if deltaY > lineTolerance || deltaY < -lineTolerance {
@@ -528,7 +528,7 @@ func sortWithinBlock(texts []Text) []Text {
 	}
 
 	// Sort each line left-to-right and flatten
-	// 预分配result，复用texts切片避免新分配
+	// Pre-allocate result, reuse texts slice to avoid new allocation
 	result := texts[:0]
 	for _, l := range lines {
 		sort.Slice(l.texts, func(i, j int) bool {
@@ -551,9 +551,9 @@ func SmartTextRunsToPlain(texts []Text) string {
 
 	// Group into lines for formatting
 	const lineTolerance = 3.0
-	// 预分配lines容量，估计行数为文本数的1/10
+	// Pre-allocate lines capacity, estimate number of lines as 1/10 of text count
 	lines := make([][]Text, 0, len(ordered)/10+1)
-	// 预分配currentLine容量
+	// Pre-allocate currentLine capacity
 	currentLine := make([]Text, 0, 10)
 	var currentY float64
 
@@ -580,13 +580,13 @@ func SmartTextRunsToPlain(texts []Text) string {
 	}
 
 	// Build output with proper spacing
-	// 改进容量预估：统计实际文本长度而非固定估算
+	// Improved capacity estimation: count actual text length instead of fixed estimation
 	estimatedLen := 0
 	for _, line := range lines {
 		for _, t := range line {
-			estimatedLen += len(t.S) + 1 // 文本长度 + 空格
+			estimatedLen += len(t.S) + 1 // text length + space
 		}
-		estimatedLen += 1 // 换行符
+		estimatedLen += 1 // newline
 	}
 	var builder strings.Builder
 	builder.Grow(estimatedLen)

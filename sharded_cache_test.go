@@ -14,14 +14,14 @@ import (
 func TestShardedCacheBasic(t *testing.T) {
 	cache := NewShardedCache(100, time.Minute)
 
-	// 测试基本的 Set 和 Get
+	// Test basic Set and Get
 	cache.Set("key1", "value1", 10)
 	val, ok := cache.Get("key1")
 	if !ok || val != "value1" {
 		t.Errorf("Expected value1, got %v, ok=%v", val, ok)
 	}
 
-	// 测试不存在的键
+	// Test nonexistent key
 	_, ok = cache.Get("nonexistent")
 	if ok {
 		t.Error("Expected false for nonexistent key")
@@ -29,9 +29,9 @@ func TestShardedCacheBasic(t *testing.T) {
 }
 
 func TestShardedCacheLRU(t *testing.T) {
-	cache := NewShardedCache(500, 0) // 总共 500 个条目，分片后每个分片约 2 个
+	cache := NewShardedCache(500, 0) // Total 500 entries, each shard has about 2 entries after sharding
 
-	// 填充缓存到超过容量
+	// Fill cache beyond capacity
 	for i := 0; i < 1000; i++ {
 		cache.Set(fmt.Sprintf("key%d", i), fmt.Sprintf("value%d", i), 10)
 	}
@@ -41,7 +41,7 @@ func TestShardedCacheLRU(t *testing.T) {
 		t.Errorf("Expected at most 500 entries, got %d", stats.Entries)
 	}
 
-	// 验证淘汰发生了
+	// Verify eviction occurred
 	if stats.Evictions == 0 {
 		t.Error("Expected evictions to occur")
 	}
@@ -52,13 +52,13 @@ func TestShardedCacheExpiration(t *testing.T) {
 
 	cache.Set("key1", "value1", 10)
 
-	// 立即获取应该成功
+	// Immediate get should succeed
 	val, ok := cache.Get("key1")
 	if !ok || val != "value1" {
 		t.Error("Expected to get value before expiration")
 	}
 
-	// 等待过期
+	// Wait for expiration
 	time.Sleep(100 * time.Millisecond)
 
 	_, ok = cache.Get("key1")
@@ -74,7 +74,7 @@ func TestShardedCacheConcurrent(t *testing.T) {
 	numGoroutines := 100
 	opsPerGoroutine := 100
 
-	// 并发写入
+	// Concurrent writes
 	wg.Add(numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
 		go func(id int) {
@@ -87,7 +87,7 @@ func TestShardedCacheConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 并发读取
+	// Concurrent reads
 	wg.Add(numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
 		go func(id int) {
@@ -153,7 +153,7 @@ func BenchmarkShardedCacheSet(b *testing.B) {
 func BenchmarkShardedCacheGet(b *testing.B) {
 	cache := NewShardedCache(10000, 0)
 
-	// 预填充
+	// Pre-fill
 	for i := 0; i < 1000; i++ {
 		cache.Set(fmt.Sprintf("key%d", i), i, 10)
 	}
@@ -168,7 +168,7 @@ func BenchmarkShardedCacheGet(b *testing.B) {
 func BenchmarkShardedCacheConcurrent(b *testing.B) {
 	cache := NewShardedCache(10000, 0)
 
-	// 预填充
+	// Pre-fill
 	for i := 0; i < 1000; i++ {
 		cache.Set(fmt.Sprintf("key%d", i), i, 10)
 	}

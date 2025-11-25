@@ -38,7 +38,7 @@ func optimizedTextRunsToPlain(texts []Text) string {
 	sort.Sort(TextVertical(runs))
 
 	const lineTolerance = 2.0
-	// P0优化: 使用自适应容量估算器
+	// P0 optimization: use adaptive capacity estimator
 	lineCapacity := lineCapacityEstimator.Estimate(len(runs)/5 + 1)
 	textCapacity := textCapacityEstimator.Estimate(10)
 	lines := make([][]Text, 0, lineCapacity)
@@ -74,14 +74,14 @@ func optimizedTextRunsToPlain(texts []Text) string {
 		lines = append(lines, currentLine)
 	}
 
-	// P0优化: 使用批量字符串构建器，精确计算所需容量
+	// P0 optimization: use batch string builder, precisely calculate required capacity
 	totalChars := 0
 	for _, line := range lines {
 		for _, t := range line {
 			totalChars += len(t.S)
 		}
 	}
-	estimatedSize := totalChars + len(lines)*2 // 加上换行符和空格
+	estimatedSize := totalChars + len(lines)*2 // plus newlines and spaces
 
 	builder := GetBuilder()
 	defer PutBuilder(builder)
@@ -98,7 +98,7 @@ func optimizedTextRunsToPlain(texts []Text) string {
 
 	result := builder.String()
 
-	// P0优化: 记录实际容量用于未来估算
+	// P0 optimization: record actual capacity for future estimation
 	lineCapacityEstimator.Record(len(lines))
 
 	return strings.TrimRight(result, "\n")

@@ -8,11 +8,11 @@ import (
 	"unsafe"
 )
 
-// ZeroCopyString 提供零拷贝字符串操作
-// 注意：这些操作需要谨慎使用，因为它们绕过了 Go 的类型安全
+// ZeroCopyString provides zero-copy string operations
+// Note: These operations need to be used carefully because they bypass Go's type safety
 
-// BytesToString 零拷贝转换 []byte 到 string
-// 警告：返回的字符串直接引用底层字节数组，不要修改原始 []byte
+// BytesToString zero-copy conversion from []byte to string
+// Warning: The returned string directly references the underlying byte array, do not modify the original []byte
 func BytesToString(b []byte) string {
 	if len(b) == 0 {
 		return ""
@@ -20,19 +20,19 @@ func BytesToString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-// StringToBytes 零拷贝转换 string 到 []byte
-// 警告：返回的 []byte 是只读的，不要修改
+// StringToBytes zero-copy conversion from string to []byte
+// Warning: The returned []byte is read-only, do not modify
 func StringToBytes(s string) []byte {
 	if s == "" {
 		return nil
 	}
-	
-	// 使用 unsafe 直接转换
+
+	// Use unsafe for direct conversion
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-// SubstringZeroCopy 零拷贝获取子字符串
-// 实际上所有字符串切片在 Go 中已经是零拷贝的
+// SubstringZeroCopy zero-copy substring extraction
+// Actually all string slicing in Go is already zero-copy
 func SubstringZeroCopy(s string, start, end int) string {
 	if start < 0 || end > len(s) || start > end {
 		return ""
@@ -40,119 +40,119 @@ func SubstringZeroCopy(s string, start, end int) string {
 	return s[start:end]
 }
 
-// StringBuffer 字符串构建缓冲区，优化多次拼接
+// StringBuffer string building buffer, optimizes multiple concatenations
 type StringBuffer struct {
 	buf []byte
 }
 
-// NewStringBuffer 创建新的字符串缓冲区
+// NewStringBuffer create new string buffer
 func NewStringBuffer(capacity int) *StringBuffer {
 	return &StringBuffer{
 		buf: make([]byte, 0, capacity),
 	}
 }
 
-// WriteString 写入字符串
+// WriteString write string
 func (sb *StringBuffer) WriteString(s string) {
 	sb.buf = append(sb.buf, s...)
 }
 
-// WriteByte 写入单个字节
+// WriteByte write single byte
 func (sb *StringBuffer) WriteByte(b byte) error {
 	sb.buf = append(sb.buf, b)
 	return nil
 }
 
-// WriteBytes 写入字节切片
+// WriteBytes write byte slice
 func (sb *StringBuffer) WriteBytes(b []byte) {
 	sb.buf = append(sb.buf, b...)
 }
 
-// String 零拷贝返回字符串
-// 警告：返回后不要再使用 StringBuffer
+// String zero-copy return string
+// Warning: Do not use StringBuffer after return
 func (sb *StringBuffer) String() string {
 	return BytesToString(sb.buf)
 }
 
-// StringCopy 安全返回字符串副本
+// StringCopy safely return string copy
 func (sb *StringBuffer) StringCopy() string {
 	return string(sb.buf)
 }
 
-// Len 返回当前长度
+// Len return current length
 func (sb *StringBuffer) Len() int {
 	return len(sb.buf)
 }
 
-// Cap 返回容量
+// Cap return capacity
 func (sb *StringBuffer) Cap() int {
 	return cap(sb.buf)
 }
 
-// Reset 重置缓冲区
+// Reset reset buffer
 func (sb *StringBuffer) Reset() {
 	sb.buf = sb.buf[:0]
 }
 
-// Bytes 返回底层字节切片
+// Bytes return underlying byte slice
 func (sb *StringBuffer) Bytes() []byte {
 	return sb.buf
 }
 
-// StringPool 字符串池，复用常见字符串
+// StringPool string pool, reuse common strings
 type StringPool struct {
 	pool map[string]string
 }
 
-// NewStringPool 创建新的字符串池
+// NewStringPool create new string pool
 func NewStringPool() *StringPool {
 	return &StringPool{
 		pool: make(map[string]string),
 	}
 }
 
-// Intern 将字符串加入池中并返回池化版本
-// 相同内容的字符串将共享内存
+// Intern add string to pool and return pooled version
+// Strings with same content will share memory
 func (sp *StringPool) Intern(s string) string {
 	if cached, ok := sp.pool[s]; ok {
 		return cached
 	}
-	// 创建新副本并存储
+	// Create new copy and store
 	sp.pool[s] = s
 	return s
 }
 
-// Clear 清空池
+// Clear clear pool
 func (sp *StringPool) Clear() {
 	sp.pool = make(map[string]string)
 }
 
-// Size 返回池中字符串数量
+// Size return number of strings in pool
 func (sp *StringPool) Size() int {
 	return len(sp.pool)
 }
 
-// InplaceStringBuilder 原地字符串构建器
-// 避免中间分配
+// InplaceStringBuilder in-place string builder
+// Avoid intermediate allocations
 type InplaceStringBuilder struct {
 	parts  []string
 	length int
 }
 
-// NewInplaceStringBuilder 创建新的原地字符串构建器
+// NewInplaceStringBuilder create new in-place string builder
 func NewInplaceStringBuilder(capacity int) *InplaceStringBuilder {
 	return &InplaceStringBuilder{
 		parts: make([]string, 0, capacity),
 	}
 }
 
-// Append 追加字符串
+// Append append string
 func (isb *InplaceStringBuilder) Append(s string) {
 	isb.parts = append(isb.parts, s)
 	isb.length += len(s)
 }
 
-// Build 构建最终字符串（一次性分配）
+// Build build final string (single allocation)
 func (isb *InplaceStringBuilder) Build() string {
 	if len(isb.parts) == 0 {
 		return ""
@@ -161,7 +161,7 @@ func (isb *InplaceStringBuilder) Build() string {
 		return isb.parts[0]
 	}
 
-	// 一次性分配足够的空间
+	// Allocate sufficient space at once
 	buf := make([]byte, 0, isb.length)
 	for _, part := range isb.parts {
 		buf = append(buf, part...)
@@ -169,31 +169,31 @@ func (isb *InplaceStringBuilder) Build() string {
 	return BytesToString(buf)
 }
 
-// Reset 重置构建器
+// Reset reset builder
 func (isb *InplaceStringBuilder) Reset() {
 	isb.parts = isb.parts[:0]
 	isb.length = 0
 }
 
-// Len 返回总长度
+// Len return total length
 func (isb *InplaceStringBuilder) Len() int {
 	return isb.length
 }
 
-// StringInterning 全局字符串驻留
+// StringInterning global string interning
 var globalStringPool = NewStringPool()
 
-// InternString 将字符串加入全局池
+// InternString adds string to global pool
 func InternString(s string) string {
 	return globalStringPool.Intern(s)
 }
 
-// ClearGlobalStringPool 清空全局字符串池
+// ClearGlobalStringPool clears the global string pool
 func ClearGlobalStringPool() {
 	globalStringPool.Clear()
 }
 
-// FastStringConcatZC 快速拼接多个字符串（零拷贝版本）
+// FastStringConcatZC fast concatenation of multiple strings (zero-copy version)
 func FastStringConcatZC(parts ...string) string {
 	if len(parts) == 0 {
 		return ""
@@ -202,13 +202,13 @@ func FastStringConcatZC(parts ...string) string {
 		return parts[0]
 	}
 
-	// 计算总长度
+	// Calculate total length
 	totalLen := 0
 	for _, part := range parts {
 		totalLen += len(part)
 	}
 
-	// 一次性分配
+	// Allocate once
 	buf := make([]byte, 0, totalLen)
 	for _, part := range parts {
 		buf = append(buf, part...)
@@ -217,8 +217,8 @@ func FastStringConcatZC(parts ...string) string {
 	return BytesToString(buf)
 }
 
-// StringSliceToByteSlice 零拷贝转换 []string 中的每个字符串
-// 返回的 [][]byte 中每个元素都是只读的
+// StringSliceToByteSlice zero-copy conversion of each string in []string
+// Each element in the returned [][]byte is read-only
 func StringSliceToByteSlice(strings []string) [][]byte {
 	result := make([][]byte, len(strings))
 	for i, s := range strings {
@@ -227,10 +227,10 @@ func StringSliceToByteSlice(strings []string) [][]byte {
 	return result
 }
 
-// CompareStringsZeroCopy 零拷贝字符串比较
-// 返回 -1 (s1 < s2), 0 (s1 == s2), 1 (s1 > s2)
+// CompareStringsZeroCopy zero-copy string comparison
+// Returns -1 (s1 < s2), 0 (s1 == s2), 1 (s1 > s2)
 func CompareStringsZeroCopy(s1, s2 string) int {
-	// Go 的字符串比较已经很高效，直接使用
+	// Go's string comparison is already efficient, use directly
 	if s1 < s2 {
 		return -1
 	}
@@ -240,16 +240,16 @@ func CompareStringsZeroCopy(s1, s2 string) int {
 	return 0
 }
 
-// HasPrefixZeroCopy 零拷贝前缀检查
+// HasPrefixZeroCopy zero-copy prefix check
 func HasPrefixZeroCopy(s, prefix string) bool {
 	if len(prefix) > len(s) {
 		return false
 	}
-	// 字符串切片是零拷贝的
+	// String slicing is zero-copy
 	return s[:len(prefix)] == prefix
 }
 
-// HasSuffixZeroCopy 零拷贝后缀检查
+// HasSuffixZeroCopy zero-copy suffix check
 func HasSuffixZeroCopy(s, suffix string) bool {
 	if len(suffix) > len(s) {
 		return false
@@ -257,12 +257,12 @@ func HasSuffixZeroCopy(s, suffix string) bool {
 	return s[len(s)-len(suffix):] == suffix
 }
 
-// TrimSpaceZeroCopy 零拷贝去除首尾空格
+// TrimSpaceZeroCopy zero-copy trim leading and trailing spaces
 func TrimSpaceZeroCopy(s string) string {
 	start := 0
 	end := len(s)
 
-	// 查找第一个非空格字符
+	// Find the first non-space character
 	for start < end {
 		c := s[start]
 		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
@@ -271,7 +271,7 @@ func TrimSpaceZeroCopy(s string) string {
 		start++
 	}
 
-	// 查找最后一个非空格字符
+	// Find the last non-space character
 	for end > start {
 		c := s[end-1]
 		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
@@ -283,8 +283,8 @@ func TrimSpaceZeroCopy(s string) string {
 	return s[start:end]
 }
 
-// SplitZeroCopy 零拷贝字符串分割
-// 返回的切片中的字符串都是原字符串的切片
+// SplitZeroCopy zero-copy string splitting
+// Strings in the returned slice are all slices of the original string
 func SplitZeroCopy(s string, sep byte) []string {
 	n := 0
 	for i := 0; i < len(s); i++ {
@@ -306,7 +306,7 @@ func SplitZeroCopy(s string, sep byte) []string {
 	return result
 }
 
-// JoinZeroCopy 零拷贝字符串连接（一次性分配）
+// JoinZeroCopy zero-copy string joining (single allocation)
 func JoinZeroCopy(parts []string, sep string) string {
 	if len(parts) == 0 {
 		return ""
@@ -315,14 +315,14 @@ func JoinZeroCopy(parts []string, sep string) string {
 		return parts[0]
 	}
 
-	// 计算总长度
+	// Calculate total length
 	totalLen := 0
 	for _, part := range parts {
 		totalLen += len(part)
 	}
 	totalLen += (len(parts) - 1) * len(sep)
 
-	// 一次性分配
+	// Allocate once
 	buf := make([]byte, 0, totalLen)
 	buf = append(buf, parts[0]...)
 	for i := 1; i < len(parts); i++ {

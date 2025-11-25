@@ -12,38 +12,38 @@ import (
 	"unsafe"
 )
 
-// 对象池用于复用搜索结果切片,减少内存分配
+// Object pool for reusing search result slices, reducing memory allocation
 var resultPool = sync.Pool{
 	New: func() interface{} {
 		return make([]*TextBlock, 0, 32)
 	},
 }
 
-// 获取复用的结果切片
+// Get reused result slice
 func getResultSlice() []*TextBlock {
 	return resultPool.Get().([]*TextBlock)
 }
 
-// 归还结果切片到池中
+// Return result slice to pool
 func putResultSlice(s []*TextBlock) {
-	if cap(s) > 1024 { // 避免保留过大的切片
+	if cap(s) > 1024 { // Avoid retaining oversized slices
 		return
 	}
 	s = s[:0]
 	resultPool.Put(s)
 }
 
-// ==================== 第一阶段优化示例 ====================
+// ==================== First Stage Optimization Example ====================
 
-// AdaptiveCapacityEstimator 自适应容量估算器
-// 基于历史数据动态调整预分配容量，减少重新分配
+// AdaptiveCapacityEstimator adaptive capacity estimator
+// Dynamically adjusts pre-allocated capacity based on historical data, reducing reallocation
 type AdaptiveCapacityEstimator struct {
 	mu         sync.RWMutex
 	history    []int
 	maxSamples int
 }
 
-// NewAdaptiveCapacityEstimator 创建新的自适应估算器
+// NewAdaptiveCapacityEstimator creates new adaptive estimator
 func NewAdaptiveCapacityEstimator(maxSamples int) *AdaptiveCapacityEstimator {
 	return &AdaptiveCapacityEstimator{
 		history:    make([]int, 0, maxSamples),
@@ -51,17 +51,17 @@ func NewAdaptiveCapacityEstimator(maxSamples int) *AdaptiveCapacityEstimator {
 	}
 }
 
-// Estimate 基于历史数据估算所需容量
+// Estimate estimates required capacity based on historical data
 func (ace *AdaptiveCapacityEstimator) Estimate(hint int) int {
 	ace.mu.RLock()
 	defer ace.mu.RUnlock()
 
 	if len(ace.history) == 0 {
-		// 无历史数据时，使用适度保守估计（调优：降低到1.3x）
+		// When no historical data, use moderately conservative estimate (tuned: reduced to 1.3x)
 		return int(float64(hint) * 1.3)
 	}
 
-	// 计算P80值作为估算（调优：从P90降低到P80）
+	// Calculate P80 value as estimate (tuned: reduced from P90 to P80)
 	sorted := make([]int, len(ace.history))
 	copy(sorted, ace.history)
 	sort.Ints(sorted)
@@ -71,46 +71,46 @@ func (ace *AdaptiveCapacityEstimator) Estimate(hint int) int {
 	}
 
 	estimated := sorted[p80Index]
-	// 确保不小于提示值
+	// Ensure not less than hint value
 	if estimated < hint {
 		return int(float64(hint) * 1.3)
 	}
 	return estimated
 }
 
-// Record 记录实际使用的容量
+// Record records actual capacity used
 func (ace *AdaptiveCapacityEstimator) Record(actual int) {
 	ace.mu.Lock()
 	defer ace.mu.Unlock()
 
 	ace.history = append(ace.history, actual)
 	if len(ace.history) > ace.maxSamples {
-		// 保持固定大小，移除最老的样本
+		// Keep fixed size, remove oldest samples
 		ace.history = ace.history[1:]
 	}
 }
 
-// 全局容量估算器实例
+// Global capacity estimator instances
 var (
 	lineCapacityEstimator = NewAdaptiveCapacityEstimator(100)
 	textCapacityEstimator = NewAdaptiveCapacityEstimator(100)
 )
 
-// BatchStringBuilder 批量字符串构建器
-// 通过精确计算所需容量，避免多次重新分配
+// BatchStringBuilder batch string builder
+// Avoids multiple reallocations by precisely calculating required capacity
 type BatchStringBuilder struct {
 	buf []byte
 }
 
-// NewBatchStringBuilder 创建批量字符串构建器
+// NewBatchStringBuilder creates batch string builder
 func NewBatchStringBuilder(texts []Text) *BatchStringBuilder {
-	// 精确计算所需容量
+	// Precisely calculate required capacity
 	totalLen := 0
 	for _, t := range texts {
 		totalLen += len(t.S)
 	}
 
-	// 额外预留空间用于分隔符和换行符
+	// Reserve extra space for separators and newlines
 	capacity := totalLen + len(texts)*2
 
 	return &BatchStringBuilder{
@@ -118,56 +118,56 @@ func NewBatchStringBuilder(texts []Text) *BatchStringBuilder {
 	}
 }
 
-// AppendTexts 批量追加文本内容
+// AppendTexts appends text content in batch
 func (bsb *BatchStringBuilder) AppendTexts(texts []Text) string {
 	for i := range texts {
 		bsb.buf = append(bsb.buf, texts[i].S...)
-		// 根据需要添加分隔符
+		// Add separator as needed
 		if i < len(texts)-1 {
-			// 简化判断逻辑，实际应调用更复杂的needsSpace
+			// Simplified judgment logic, should actually call more complex needsSpace
 			bsb.buf = append(bsb.buf, ' ')
 		}
 	}
 
-	// 使用unsafe.String避免拷贝
+	// Use unsafe.String to avoid copying
 	return unsafe.String(unsafe.SliceData(bsb.buf), len(bsb.buf))
 }
 
-// String 返回构建的字符串
+// String returns built string
 func (bsb *BatchStringBuilder) String() string {
 	return unsafe.String(unsafe.SliceData(bsb.buf), len(bsb.buf))
 }
 
-// Reset 重置构建器以便重用
+// Reset resets builder for reuse
 func (bsb *BatchStringBuilder) Reset() {
 	bsb.buf = bsb.buf[:0]
 }
 
-// ==================== 第二阶段优化示例 ====================
+// ==================== Second Stage Optimization Example ====================
 
-// KDNode KD树节点
+// KDNode KD tree node
 type KDNode struct {
-	point []float64  // 坐标点 [x, y]
-	data  *TextBlock // 关联的文本块
+	point []float64  // Coordinate point [x, y]
+	data  *TextBlock // Associated text block
 	left  *KDNode
 	right *KDNode
-	axis  int // 分割轴（0=x, 1=y）
+	axis  int // Split axis (0=x, 1=y)
 }
 
-// KDTree KD树空间索引
-// 用于O(log n)时间复杂度的最近邻搜索
+// KDTree KD tree spatial index
+// For O(log n) time complexity nearest neighbor search
 type KDTree struct {
 	root      *KDNode
 	dimension int
 }
 
-// BuildKDTree 从文本块构建KD树
+// BuildKDTree builds KD tree from text blocks
 func BuildKDTree(blocks []*TextBlock) *KDTree {
 	if len(blocks) == 0 {
 		return &KDTree{dimension: 2}
 	}
 
-	// 将TextBlock转换为点
+	// Convert TextBlock to points
 	points := make([]kdPoint, len(blocks))
 	for i, block := range blocks {
 		center := block.Center()
@@ -187,20 +187,20 @@ type kdPoint struct {
 	data   *TextBlock
 }
 
-// buildKDTreeRecursiveIndexed 使用索引避免切片复制的优化版本
+// buildKDTreeRecursiveIndexed optimized version using indices to avoid slice copying
 func buildKDTreeRecursiveIndexed(points []kdPoint, indices []int, depth int) *KDNode {
 	if len(indices) == 0 {
 		return nil
 	}
 
-	axis := depth % 2 // 在2D空间中交替使用x和y轴
+	axis := depth % 2 // Alternate between x and y axes in 2D space
 
-	// 按当前轴排序索引
+	// Sort indices by current axis
 	sort.Slice(indices, func(i, j int) bool {
 		return points[indices[i]].coords[axis] < points[indices[j]].coords[axis]
 	})
 
-	// 选择中位数作为分割点
+	// Select median as split point
 	medianPos := len(indices) / 2
 	medianIdx := indices[medianPos]
 
@@ -214,7 +214,7 @@ func buildKDTreeRecursiveIndexed(points []kdPoint, indices []int, depth int) *KD
 }
 
 func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
-	// 创建索引数组,只分配一次
+	// Create index array, allocate only once
 	indices := make([]int, len(points))
 	for i := range indices {
 		indices[i] = i
@@ -222,29 +222,29 @@ func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
 	return buildKDTreeRecursiveIndexed(points, indices, depth)
 }
 
-// RangeSearch 范围搜索，返回距离目标点在指定半径内的所有文本块
-// 使用迭代方式替代递归,避免深度递归导致的大量内存分配
+// RangeSearch range search, returns all text blocks within specified radius of target point
+// Use iterative approach instead of recursion to avoid large memory allocation from deep recursion
 func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 	if tree.root == nil {
 		return nil
 	}
 
-	// 从对象池获取结果切片
+	// Get result slice from object pool
 	result := getResultSlice()
 
-	// 使用栈进行迭代搜索,避免递归调用栈开销
+	// Use stack for iterative search, avoid recursion call stack overhead
 	type stackItem struct {
 		node *KDNode
 	}
 
-	// 使用固定大小的栈,避免动态扩容
+	// Use fixed-size stack, avoid dynamic expansion
 	stack := make([]stackItem, 0, 64)
 	stack = append(stack, stackItem{node: tree.root})
 
 	radiusSq := radius * radius
 
 	for len(stack) > 0 {
-		// 弹出栈顶元素
+		// Pop top element from stack
 		idx := len(stack) - 1
 		current := stack[idx].node
 		stack = stack[:idx]
@@ -253,32 +253,32 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 			continue
 		}
 
-		// 计算当前点到目标点的距离平方
+		// Calculate squared distance from current point to target point
 		dist := euclideanDistance(current.point, target)
 		if dist <= radiusSq {
 			result = append(result, current.data)
 		}
 
-		// 计算到分割超平面的距离
+		// Calculate distance to split hyperplane
 		planeDist := target[current.axis] - current.point[current.axis]
 		planeDist2 := planeDist * planeDist
 
-		// 决定搜索顺序
+		// Decide search order
 		if planeDist < 0 {
-			// 先搜索左侧(近侧)
+			// Search left side first (near side)
 			if current.left != nil {
 				stack = append(stack, stackItem{node: current.left})
 			}
-			// 如果超平面在范围内,也搜索右侧(远侧)
+			// If hyperplane is in range, also search right side (far side)
 			if planeDist2 <= radiusSq && current.right != nil {
 				stack = append(stack, stackItem{node: current.right})
 			}
 		} else {
-			// 先搜索右侧(近侧)
+			// Search right side first (near side)
 			if current.right != nil {
 				stack = append(stack, stackItem{node: current.right})
 			}
-			// 如果超平面在范围内,也搜索左侧(远侧)
+			// If hyperplane is in range, also search left side (far side)
 			if planeDist2 <= radiusSq && current.left != nil {
 				stack = append(stack, stackItem{node: current.left})
 			}
@@ -288,27 +288,27 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 	return result
 }
 
-// 已废弃: 使用迭代方式替代
-// rangeSearchRecursive 的递归实现已被迭代方式取代
+// Deprecated: use iterative approach instead
+// rangeSearchRecursive's recursive implementation has been replaced by iterative approach
 func (tree *KDTree) rangeSearchRecursive(node *KDNode, target []float64, radius float64, result *[]*TextBlock) {
-	// 此函数已废弃,保留仅为兼容性
-	// 实际使用迭代版本的 RangeSearch
+	// This function is deprecated, kept only for compatibility
+	// Actually use iterative version of RangeSearch
 }
 
 func euclideanDistance(p1, p2 []float64) float64 {
 	dx := p1[0] - p2[0]
 	dy := p1[1] - p2[1]
-	return dx*dx + dy*dy // 返回距离平方，避免sqrt
+	return dx*dx + dy*dy // Return squared distance, avoid sqrt
 }
 
-// ClusterTextBlocksOptimized 使用KD树优化的文本块聚类
-// 优化版本:减少临时对象分配,使用对象池
+// ClusterTextBlocksOptimized uses KD tree optimized text block clustering
+// Optimized version: reduce temporary object allocation, use object pool
 func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
 	}
 
-	// 计算平均字体大小作为距离阈值
+	// Calculate average font size as distance threshold
 	var totalFontSize float64
 	for i := range texts {
 		totalFontSize += texts[i].FontSize
@@ -317,8 +317,8 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 	distThreshold := avgFontSize * 2.0
 	distThresholdSq := distThreshold * distThreshold
 
-	// 初始化：每个文本作为独立块
-	// 优化: 预分配精确大小避免扩容
+	// Initialize: each text as independent block
+	// Optimization: pre-allocate exact size to avoid expansion
 	blocks := make([]*TextBlock, len(texts))
 	for i := range texts {
 		t := &texts[i]
@@ -332,22 +332,22 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		}
 	}
 
-	// 构建KD树
+	// Build KD tree
 	kdtree := BuildKDTree(blocks)
 
-	// 使用并查集进行聚类
+	// Use union-find for clustering
 	parent := make([]int, len(blocks))
 	for i := range parent {
 		parent[i] = i
 	}
 
-	// 非递归的 find 函数,使用迭代路径压缩避免栈溢出
+	// Non-recursive find function, use iterative path compression to avoid stack overflow
 	find := func(x int) int {
 		root := x
 		for parent[root] != root {
 			root = parent[root]
 		}
-		// 路径压缩
+		// Path compression
 		for parent[x] != root {
 			next := parent[x]
 			parent[x] = root
@@ -363,16 +363,16 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		}
 	}
 
-	// 创建block到索引的映射,避免重复查找
+	// Create block to index mapping, avoid repeated lookups
 	blockToIdx := make(map[*TextBlock]int, len(blocks))
 	for i, block := range blocks {
 		blockToIdx[block] = i
 	}
 
-	// 对每个块查找近邻并合并
+	// Find neighbors for each block and merge
 	for i, block := range blocks {
 		center := block.Center()
-		// 使用优化后的迭代搜索
+		// Use optimized iterative search
 		neighbors := kdtree.RangeSearch([]float64{center.X, center.Y}, distThresholdSq)
 
 		for _, neighbor := range neighbors {
@@ -383,19 +383,19 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 			}
 		}
 
-		// 归还搜索结果切片到池中复用
+		// Return search result slice to pool for reuse
 		putResultSlice(neighbors)
 	}
 
-	// 收集聚类结果
-	// 优化: 预估集群数量减少 map 扩容
+	// Collect clustering results
+	// Optimization: estimate cluster count to reduce map expansion
 	clusterMap := make(map[int][]*TextBlock, len(blocks)/4)
 	for i, block := range blocks {
 		root := find(i)
 		clusterMap[root] = append(clusterMap[root], block)
 	}
 
-	// 合并每个聚类中的文本块
+	// Merge text blocks in each cluster
 	result := make([]*TextBlock, 0, len(clusterMap))
 	for _, cluster := range clusterMap {
 		merged := mergeTextBlocks(cluster)
@@ -413,7 +413,7 @@ func mergeTextBlocks(blocks []*TextBlock) *TextBlock {
 		return blocks[0]
 	}
 
-	// 预先计算总文本数量，一次性分配
+	// Pre-calculate total text count, allocate at once
 	totalTexts := 0
 	for _, block := range blocks {
 		totalTexts += len(block.Texts)
@@ -455,10 +455,10 @@ func mergeTextBlocks(blocks []*TextBlock) *TextBlock {
 	return merged
 }
 
-// ==================== 工作窃取调度器 ====================
+// ==================== Work Stealing Scheduler ====================
 
-// WorkStealingScheduler 工作窃取调度器
-// 减少goroutine创建开销，提升并行处理效率
+// WorkStealingScheduler work stealing scheduler
+// Reduce goroutine creation overhead, improve parallel processing efficiency
 type WorkStealingScheduler struct {
 	workers     []*Worker
 	globalQueue chan Task
@@ -468,20 +468,20 @@ type WorkStealingScheduler struct {
 	stop        chan struct{}
 }
 
-// Worker 工作线程
+// Worker worker thread
 type Worker struct {
 	id         int
 	localQueue chan Task
 	scheduler  *WorkStealingScheduler
-	stealing   atomic.Bool // 标记是否正在窃取
+	stealing   atomic.Bool // Mark if currently stealing
 }
 
-// Task 任务接口
+// Task task interface
 type Task interface {
 	Execute() error
 }
 
-// NewWorkStealingScheduler 创建工作窃取调度器
+// NewWorkStealingScheduler create work stealing scheduler
 func NewWorkStealingScheduler(numWorkers int) *WorkStealingScheduler {
 	if numWorkers <= 0 {
 		numWorkers = 4
@@ -494,7 +494,7 @@ func NewWorkStealingScheduler(numWorkers int) *WorkStealingScheduler {
 		stop:        make(chan struct{}),
 	}
 
-	// 创建worker
+	// Create worker
 	for i := 0; i < numWorkers; i++ {
 		scheduler.workers[i] = &Worker{
 			id:         i,
@@ -506,7 +506,7 @@ func NewWorkStealingScheduler(numWorkers int) *WorkStealingScheduler {
 	return scheduler
 }
 
-// Start 启动调度器
+// Start start scheduler
 func (wss *WorkStealingScheduler) Start() {
 	for _, worker := range wss.workers {
 		wss.wg.Add(1)
@@ -514,28 +514,28 @@ func (wss *WorkStealingScheduler) Start() {
 	}
 }
 
-// Submit 提交任务
+// Submit submit task
 func (wss *WorkStealingScheduler) Submit(task Task) {
-	// 轮询分配到worker本地队列
+	// Round-robin assign to worker local queue
 	wss.taskWg.Add(1)
 	select {
 	case wss.globalQueue <- task:
 	default:
-		// 全局队列满，直接执行
+		// Global queue full, execute directly
 		task.Execute()
 		wss.taskWg.Done()
 	}
 }
 
-// Stop 停止调度器
+// Stop stop scheduler
 func (wss *WorkStealingScheduler) Stop() {
 	close(wss.stop)
 	wss.wg.Wait()
 }
 
-// Wait 等待所有任务完成
+// Wait wait for all tasks to complete
 func (wss *WorkStealingScheduler) Wait() {
-	// 等待所有已提交的任务执行完成
+	// Wait for all submitted tasks to complete execution
 	wss.taskWg.Wait()
 }
 
@@ -548,19 +548,19 @@ func (w *Worker) run() {
 			return
 
 		case task := <-w.localQueue:
-			// 优先处理本地队列
+			// Prioritize processing local queue
 			w.execute(task)
 
 		case task := <-w.scheduler.globalQueue:
-			// 处理全局队列任务
+			// Process global queue tasks
 			w.execute(task)
 
 		default:
-			// 尝试窃取其他worker的任务
+			// Try to steal tasks from other workers
 			if task := w.steal(); task != nil {
 				w.execute(task)
 			} else {
-				// 无任务时短暂休眠
+				// Sleep briefly when no tasks
 				time.Sleep(100 * time.Microsecond)
 			}
 		}
@@ -583,7 +583,7 @@ func (w *Worker) steal() Task {
 	w.stealing.Store(true)
 	defer w.stealing.Store(false)
 
-	// 尝试从其他worker窃取
+	// Try to steal from other workers
 	for i := 0; i < w.scheduler.numWorkers; i++ {
 		if i == w.id {
 			continue
@@ -600,13 +600,13 @@ func (w *Worker) steal() Task {
 	return nil
 }
 
-// ==================== 多级缓存实现 ====================
+// ==================== Multi-level Cache Implementation ====================
 
-// MultiLevelCache 多级缓存管理器
+// MultiLevelCache multi-level cache manager
 type MultiLevelCache struct {
-	l1    sync.Map     // L1: 热数据（无锁）
-	l2    *ResultCache // L2: 温数据（LRU）
-	l3    *ResultCache // L3: 冷数据（大容量）
+	l1    sync.Map     // L1: hot data (lock-free)
+	l2    *ResultCache // L2: warm data (LRU)
+	l3    *ResultCache // L3: cold data (large capacity)
 	stats struct {
 		l1Hits   atomic.Uint64
 		l2Hits   atomic.Uint64
@@ -616,7 +616,7 @@ type MultiLevelCache struct {
 	}
 }
 
-// NewMultiLevelCache 创建多级缓存
+// NewMultiLevelCache create multi-level cache
 func NewMultiLevelCache() *MultiLevelCache {
 	return &MultiLevelCache{
 		l2: NewResultCache(10*1024*1024, 5*time.Minute, "LRU"),   // 10MB, 5min
@@ -624,26 +624,26 @@ func NewMultiLevelCache() *MultiLevelCache {
 	}
 }
 
-// Get 从缓存获取数据
+// Get get data from cache
 func (mlc *MultiLevelCache) Get(key string) (interface{}, bool) {
-	// L1查找（最快）
+	// L1 lookup (fastest)
 	if val, ok := mlc.l1.Load(key); ok {
 		mlc.stats.l1Hits.Add(1)
 		return val, true
 	}
 
-	// L2查找
+	// L2 lookup
 	if val, ok := mlc.l2.Get(key); ok {
 		mlc.stats.l2Hits.Add(1)
-		// 提升到L1
+		// Promote to L1
 		mlc.l1.Store(key, val)
 		return val, true
 	}
 
-	// L3查找
+	// L3 lookup
 	if val, ok := mlc.l3.Get(key); ok {
 		mlc.stats.l3Hits.Add(1)
-		// 提升到L2
+		// Promote to L2
 		mlc.l2.Put(key, val)
 		return val, true
 	}
@@ -652,27 +652,27 @@ func (mlc *MultiLevelCache) Get(key string) (interface{}, bool) {
 	return nil, false
 }
 
-// Put 存入缓存
+// Put store in cache
 func (mlc *MultiLevelCache) Put(key string, value interface{}) {
-	// 新数据直接存入L1
+	// New data directly stored in L1
 	mlc.l1.Store(key, value)
-	// 同时存入L2作为备份
+	// Also stored in L2 as backup
 	mlc.l2.Put(key, value)
 }
 
-// Prefetch 预取页面数据
+// Prefetch prefetch page data
 func (mlc *MultiLevelCache) Prefetch(keys []string) {
 	mlc.stats.prefetch.Add(uint64(len(keys)))
-	// 异步预取
+	// Async prefetch
 	go func() {
 		for _, key := range keys {
 			mlc.Get(key)
-			// 如果未命中，可以触发外部加载逻辑
+			// If not hit, can trigger external loading logic
 		}
 	}()
 }
 
-// Stats 获取缓存统计
+// Stats get cache statistics
 func (mlc *MultiLevelCache) Stats() map[string]uint64 {
 	total := mlc.stats.l1Hits.Load() + mlc.stats.l2Hits.Load() +
 		mlc.stats.l3Hits.Load() + mlc.stats.misses.Load()
@@ -693,31 +693,31 @@ func (mlc *MultiLevelCache) Stats() map[string]uint64 {
 	}
 }
 
-// ==================== 性能监控 ====================
+// ==================== Performance Monitoring ====================
 
-// PerformanceMetrics 性能指标收集器
+// PerformanceMetrics performance metrics collector
 type PerformanceMetrics struct {
-	ExtractDuration atomic.Int64 // 纳秒
+	ExtractDuration atomic.Int64 // nanoseconds
 	ParseDuration   atomic.Int64
 	SortDuration    atomic.Int64
 	TotalAllocs     atomic.Uint64
 	BytesAllocated  atomic.Uint64
 	GoroutineCount  atomic.Int32
-	CacheHitRate    atomic.Uint64 // 百分比 * 100
+	CacheHitRate    atomic.Uint64 // percentage * 100
 }
 
-// RecordExtractDuration 记录提取耗时
+// RecordExtractDuration record extraction duration
 func (pm *PerformanceMetrics) RecordExtractDuration(d time.Duration) {
 	pm.ExtractDuration.Store(int64(d))
 }
 
-// RecordAllocation 记录内存分配
+// RecordAllocation record memory allocation
 func (pm *PerformanceMetrics) RecordAllocation(bytes uint64) {
 	pm.TotalAllocs.Add(1)
 	pm.BytesAllocated.Add(bytes)
 }
 
-// GetMetrics 获取当前指标快照
+// GetMetrics get current metrics snapshot
 func (pm *PerformanceMetrics) GetMetrics() map[string]interface{} {
 	return map[string]interface{}{
 		"extract_duration_ms": float64(pm.ExtractDuration.Load()) / 1e6,
@@ -730,5 +730,5 @@ func (pm *PerformanceMetrics) GetMetrics() map[string]interface{} {
 	}
 }
 
-// 全局性能指标实例
+// Global performance metrics instance
 var GlobalMetrics = &PerformanceMetrics{}

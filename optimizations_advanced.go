@@ -13,9 +13,9 @@ import (
 	"unsafe"
 )
 
-// ==================== 高级优化实现 ====================
+// ==================== Advanced optimization implementation ====================
 
-// 1. 细粒度对象池 - 多级大小分桶
+// 1. Fine-grained object pool - multi-level size bucketing
 type SizedPool struct {
 	pools [8]*sync.Pool
 	sizes [8]int
@@ -38,7 +38,7 @@ func NewSizedPool() *SizedPool {
 }
 
 func (sp *SizedPool) Get(size int) []byte {
-	// 使用位运算快速计算池索引
+	// Use bit operations to quickly calculate pool index
 	idx := bits.Len(uint(size)) - 5
 	if idx < 0 {
 		idx = 0
@@ -64,7 +64,7 @@ func (sp *SizedPool) Put(bufPtr *[]byte) {
 	sp.pools[idx].Put(bufPtr)
 }
 
-// 2. 零拷贝字符串构建器
+// 2. Zero-copy string builder
 type ZeroCopyBuilder struct {
 	buf []byte
 }
@@ -84,7 +84,7 @@ func (b *ZeroCopyBuilder) WriteByte(c byte) error {
 	return nil
 }
 
-// UnsafeString 零拷贝返回字符串（注意：底层buffer不能修改）
+// UnsafeString Zero-copy return string (note: underlying buffer cannot be modified)
 func (b *ZeroCopyBuilder) UnsafeString() string {
 	return unsafe.String(unsafe.SliceData(b.buf), len(b.buf))
 }
@@ -93,17 +93,17 @@ func (b *ZeroCopyBuilder) Reset() {
 	b.buf = b.buf[:0]
 }
 
-// 3. Lock-free 环形缓冲区（用于生产者-消费者）
+// 3. Lock-free ring buffer (for producer-consumer)
 type LockFreeRingBuffer struct {
 	buffer []interface{}
 	mask   uint64
-	head   uint64   // 写位置
-	tail   uint64   // 读位置
+	head   uint64   // write position
+	tail   uint64   // read position
 	_      [56]byte // cache line padding to prevent false sharing
 }
 
 func NewLockFreeRingBuffer(size int) *LockFreeRingBuffer {
-	// 确保size是2的幂
+	// Ensure size is power of 2
 	size = 1 << bits.Len(uint(size-1))
 
 	return &LockFreeRingBuffer{
@@ -117,12 +117,12 @@ func (rb *LockFreeRingBuffer) Push(item interface{}) bool {
 		head := atomic.LoadUint64(&rb.head)
 		tail := atomic.LoadUint64(&rb.tail)
 
-		// 检查是否已满
+		// Check if full
 		if head-tail >= uint64(len(rb.buffer)) {
 			return false
 		}
 
-		// 尝试CAS更新head
+		// Try CAS update head
 		if atomic.CompareAndSwapUint64(&rb.head, head, head+1) {
 			rb.buffer[head&rb.mask] = item
 			return true
@@ -135,12 +135,12 @@ func (rb *LockFreeRingBuffer) Pop() (interface{}, bool) {
 		tail := atomic.LoadUint64(&rb.tail)
 		head := atomic.LoadUint64(&rb.head)
 
-		// 检查是否为空
+		// Check if empty
 		if tail >= head {
 			return nil, false
 		}
 
-		// 尝试CAS更新tail
+		// Try CAS update tail
 		if atomic.CompareAndSwapUint64(&rb.tail, tail, tail+1) {
 			item := rb.buffer[tail&rb.mask]
 			return item, true
@@ -148,10 +148,10 @@ func (rb *LockFreeRingBuffer) Pop() (interface{}, bool) {
 	}
 }
 
-// 4. 缓存行对齐结构
+// 4. Cache line aligned structure
 type CacheLinePadded struct {
 	value uint64
-	_     [7]uint64 // 填充到64字节
+	_     [7]uint64 // pad to 64 bytes
 }
 
 type CacheLineAlignedCounter struct {
@@ -172,7 +172,7 @@ func (c *CacheLineAlignedCounter) Get(idx int) uint64 {
 	return atomic.LoadUint64(&c.counters[idx].value)
 }
 
-// 5. Work-Stealing Deque (Chase-Lev算法)
+// 5. Work-Stealing Deque (Chase-Lev algorithm)
 type WSDeque struct {
 	mu   sync.Mutex
 	data []WSTask
@@ -188,14 +188,14 @@ func NewWSDeque(size int) *WSDeque {
 	}
 }
 
-// PushBottom - owner线程从底部插入
+// PushBottom - owner thread pushes from bottom
 func (d *WSDeque) PushBottom(task WSTask) {
 	d.mu.Lock()
 	d.data = append(d.data, task)
 	d.mu.Unlock()
 }
 
-// PopBottom - owner线程从底部弹出（LIFO）
+// PopBottom - owner thread pops from bottom (LIFO)
 func (d *WSDeque) PopBottom() WSTask {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -210,7 +210,7 @@ func (d *WSDeque) PopBottom() WSTask {
 	return task
 }
 
-// Steal - 其他线程从顶部偷取（FIFO）
+// Steal - other threads steal from top (FIFO)
 func (d *WSDeque) Steal() WSTask {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -224,7 +224,7 @@ func (d *WSDeque) Steal() WSTask {
 	return task
 }
 
-// 6. Work-Stealing线程池
+// 6. Work-Stealing thread pool
 type WorkStealingExecutor struct {
 	workers    []*WSWorker
 	numWorkers int
@@ -276,7 +276,7 @@ func (p *WorkStealingExecutor) Submit(task WSTask) {
 	if p.stopped.Load() {
 		return
 	}
-	// 随机选择一个worker提交任务
+	// Randomly select a worker to submit task
 	idx := int(p.roundRobin.Add(1)-1) % p.numWorkers
 	p.workers[idx].deque.PushBottom(task)
 }
@@ -285,35 +285,35 @@ func (w *WSWorker) run() {
 	defer w.pool.wg.Done()
 
 	for !w.pool.stopped.Load() {
-		// 1. 从自己的deque底部取任务（LIFO，缓存友好）
+		// 1. Take task from own deque bottom (LIFO, cache friendly)
 		if task := w.deque.PopBottom(); task != nil {
 			task.Execute()
 			continue
 		}
 
-		// 2. 随机从其他worker偷取任务
+		// 2. Randomly steal tasks from other workers
 		victim := (w.id + 1 + runtime.GOMAXPROCS(0)) % w.pool.numWorkers
 		if task := w.pool.workers[victim].deque.Steal(); task != nil {
 			task.Execute()
 			continue
 		}
 
-		// 3. 没有任务，让出CPU
+		// 3. No tasks, yield CPU
 		runtime.Gosched()
 	}
 }
 
-// 7. Radix Sort 浮点数优化
+// 7. Radix Sort float64 optimization
 func RadixSortFloat64(values []float64) {
 	if len(values) <= 1 {
 		return
 	}
 
-	// 将float64转换为uint64保持排序顺序
+	// Convert float64 to uint64 to maintain sort order
 	keys := make([]uint64, len(values))
 	for i, v := range values {
 		bits := math.Float64bits(v)
-		// 处理负数：如果符号位是1，翻转所有位；否则只翻转符号位
+		// Handle negative numbers: if sign bit is 1, flip all bits; otherwise flip only sign bit
 		mask := -uint64(int64(bits)>>63) | 0x8000000000000000
 		keys[i] = bits ^ mask
 	}
@@ -326,18 +326,18 @@ func RadixSortFloat64(values []float64) {
 	}
 
 	for shift := uint(0); shift < 64; shift += 8 {
-		// 清空桶
+		// Clear buckets
 		for i := range buckets {
 			buckets[i] = buckets[i][:0]
 		}
 
-		// 分桶
+		// Bucket
 		for i, k := range keys {
 			bucket := (k >> shift) & 0xFF
 			buckets[bucket] = append(buckets[bucket], i)
 		}
 
-		// 收集
+		// Collect
 		idx := 0
 		for _, bucket := range buckets {
 			for _, i := range bucket {
@@ -349,7 +349,7 @@ func RadixSortFloat64(values []float64) {
 	}
 }
 
-// 8. Hilbert曲线计算（用于空间索引）
+// 8. Hilbert curve calculation (for spatial indexing)
 func HilbertXYToIndex(x, y, order uint32) uint64 {
 	var index uint64
 	var rx, ry, s uint32
@@ -361,7 +361,7 @@ func HilbertXYToIndex(x, y, order uint32) uint64 {
 
 		index += uint64(s * s * ((3 * rx) ^ ry))
 
-		// 旋转
+		// Rotate
 		if ry == 0 {
 			if rx == 1 {
 				x = n - 1 - x
@@ -374,7 +374,7 @@ func HilbertXYToIndex(x, y, order uint32) uint64 {
 	return index
 }
 
-// 9. SIMD友好的批量操作（伪代码，实际需要汇编）
+// 9. SIMD-friendly batch operations (pseudocode, actual assembly needed)
 func BatchCompareFloat64(a, b []float64, threshold float64) []bool {
 	if len(a) != len(b) {
 		panic("length mismatch")
@@ -382,18 +382,18 @@ func BatchCompareFloat64(a, b []float64, threshold float64) []bool {
 
 	result := make([]bool, len(a))
 
-	// 理想情况下使用AVX2一次处理4个float64
-	// 这里是标量版本，实际应该用汇编实现
+	// Ideally use AVX2 to process 4 float64 at once
+	// This is scalar version, should actually be implemented in assembly
 	i := 0
 	for ; i+4 <= len(a); i += 4 {
-		// AVX2: 一次加载4个值，比较，存储
+		// AVX2: load 4 values at once, compare, store
 		result[i] = math.Abs(a[i]-b[i]) < threshold
 		result[i+1] = math.Abs(a[i+1]-b[i+1]) < threshold
 		result[i+2] = math.Abs(a[i+2]-b[i+2]) < threshold
 		result[i+3] = math.Abs(a[i+3]-b[i+3]) < threshold
 	}
 
-	// 处理剩余元素
+	// Process remaining elements
 	for ; i < len(a); i++ {
 		result[i] = math.Abs(a[i]-b[i]) < threshold
 	}
@@ -401,7 +401,7 @@ func BatchCompareFloat64(a, b []float64, threshold float64) []bool {
 	return result
 }
 
-// 10. 内存池管理器（减少GC压力）
+// 10. Memory pool manager (reduce GC pressure)
 type MemoryArena struct {
 	chunks    [][]byte
 	chunkSize int
@@ -421,13 +421,13 @@ func (a *MemoryArena) Alloc(size int) []byte {
 	defer a.mu.Unlock()
 
 	if size > a.chunkSize {
-		// 大对象直接分配
+		// Allocate large objects directly
 		return make([]byte, size)
 	}
 
-	// 检查当前chunk是否有足够空间
+	// Check if current chunk has enough space
 	if len(a.chunks) == 0 || a.offset+size > a.chunkSize {
-		// 分配新chunk
+		// Allocate new chunk
 		a.chunks = append(a.chunks, make([]byte, a.chunkSize))
 		a.offset = 0
 	}
@@ -447,29 +447,29 @@ func (a *MemoryArena) Reset() {
 	a.offset = 0
 }
 
-// 使用示例
+// Usage example
 func ExampleOptimizations() {
-	// 1. 使用细粒度对象池
+	// 1. Use fine-grained object pool
 	pool := NewSizedPool()
 	buf := pool.Get(100)
-	// ... 使用buf
+	// ... use buf
 	pool.Put(&buf)
 
-	// 2. 零拷贝字符串构建
+	// 2. Zero-copy string building
 	builder := NewZeroCopyBuilder(1024)
 	builder.WriteString("Hello")
 	builder.WriteString(" World")
-	str := builder.UnsafeString() // 零拷贝
+	str := builder.UnsafeString() // zero-copy
 	_ = str
 
-	// 3. Work-stealing执行器
+	// 3. Work-stealing executor
 	executor := NewWorkStealingExecutor(4)
 	executor.Start()
 	defer executor.Stop()
 
-	// 提交任务
+	// Submit task
 	task := &wsSimpleTask{fn: func() {
-		// 执行实际工作
+		// Execute actual work
 	}}
 	executor.Submit(task)
 
@@ -477,12 +477,12 @@ func ExampleOptimizations() {
 	values := []float64{3.14, 1.41, 2.71, 1.73}
 	RadixSortFloat64(values)
 
-	// 5. Hilbert索引
+	// 5. Hilbert index
 	idx := HilbertXYToIndex(10, 20, 8)
 	_ = idx
 }
 
-// 实现WSTask接口
+// Implement WSTask interface
 type wsSimpleTask struct {
 	fn func()
 }

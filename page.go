@@ -965,7 +965,7 @@ func textRunsToPlain(texts []Text) string {
 		lines = append(lines, currentLine)
 	}
 
-	// 使用零拷贝 StringBuffer 提升性能
+	// Use zero-copy StringBuffer to improve performance
 	totalLen := 0
 	for _, line := range lines {
 		for _, t := range line {
@@ -985,7 +985,7 @@ func textRunsToPlain(texts []Text) string {
 	return TrimSpaceZeroCopy(result)
 }
 
-// appendLineZC 零拷贝版本的 appendLine
+// appendLineZC zero-copy version of appendLine
 func appendLineZC(builder *StringBuffer, line []Text) {
 	const minGap = 0.5
 	var prevEnd float64
@@ -1572,9 +1572,9 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 	decoded := enc.Decode(s)
 	vertical := g.Tf.writingMode() == 1
 
-	// 预分配text切片容量，避免多次扩容
+	// Pre-allocate text slice capacity to avoid multiple expansions
 	if cap(ce.text)-len(ce.text) < len(decoded) {
-		newCap := len(ce.text) + len(decoded) + 64 // 额外预留64个位置
+		newCap := len(ce.text) + len(decoded) + 64 // additionally reserve 64 positions
 		newText := make([]Text, len(ce.text), newCap)
 		copy(newText, ce.text)
 		ce.text = newText
@@ -1594,7 +1594,7 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 
 		Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
 		bold, italic, underline := parseFontStyles(f)
-		// 减少string(ch)的内存分配，直接使用decoded字符串
+		// Reduce memory allocation of string(ch), directly use decoded string
 		ce.text = append(ce.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch), vertical, bold, italic, underline})
 
 		tx := w0/1000*g.Tfs + g.Tc

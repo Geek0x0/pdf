@@ -29,7 +29,7 @@ func TestPoolWarmerBasic(t *testing.T) {
 		t.Error("Pool should be warmed after warmup")
 	}
 
-	// 再次预热应该不会出错
+	// Second warmup should not error
 	err = warmer.Warmup(nil)
 	if err != nil {
 		t.Fatalf("Second warmup failed: %v", err)
@@ -102,7 +102,7 @@ func TestWarmupSequentialVsConcurrent(t *testing.T) {
 }
 
 func TestAutoWarmup(t *testing.T) {
-	// 重置全局预热器
+	// Reset global warmer
 	GlobalPoolWarmer.Reset()
 
 	err := AutoWarmup()
@@ -122,7 +122,7 @@ func TestOptimizedStartup(t *testing.T) {
 		PreallocateCaches: true,
 		FontCacheSize:     100,
 		ResultCacheSize:   1000,
-		TuneGC:            false, // 不调整 GC 避免影响其他测试
+		TuneGC:            false, // do not adjust GC to avoid affecting other tests
 		SetMaxProcs:       false,
 	}
 
@@ -133,7 +133,7 @@ func TestOptimizedStartup(t *testing.T) {
 }
 
 func TestPreallocateCache(t *testing.T) {
-	// 这主要测试不会崩溃
+	// This mainly tests that it doesn't crash
 	PreallocateCache(100, 1000)
 	PreallocateCache(0, 0)
 }

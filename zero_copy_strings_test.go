@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// TestZeroCopyStringBasic 基本零拷贝操作测试
+// TestZeroCopyStringBasic Basic zero-copy operation test
 func TestZeroCopyStringBasic(t *testing.T) {
 	// BytesToString
 	bytes := []byte("hello world")
@@ -33,7 +33,7 @@ func TestZeroCopyStringBasic(t *testing.T) {
 	}
 }
 
-// TestStringBuffer 测试零拷贝字符串缓冲区
+// TestStringBuffer Test zero-copy string buffer
 func TestStringBuffer(t *testing.T) {
 	builder := NewStringBuffer(100)
 
@@ -46,21 +46,21 @@ func TestStringBuffer(t *testing.T) {
 		t.Errorf("Expected 'Hello World', got '%s'", result)
 	}
 
-	// 测试重置
+	// Test reset
 	builder.Reset()
 	if builder.Len() != 0 {
 		t.Errorf("Expected length 0 after reset, got %d", builder.Len())
 	}
 }
 
-// TestStringPool 测试字符串池
+// TestStringPool Test string pool
 func TestStringPool(t *testing.T) {
 	pool := NewStringPool()
 
 	s1 := pool.Intern("test")
 	s2 := pool.Intern("test")
 
-	// 同样的字符串应该返回相同的引用
+	// The same string should return the same reference
 	if s1 != s2 {
 		t.Error("String pool should return same reference for identical strings")
 	}
@@ -75,7 +75,7 @@ func TestStringPool(t *testing.T) {
 	}
 }
 
-// TestInplaceStringBuilder 测试原地字符串构建器
+// TestInplaceStringBuilder Test in-place string builder
 func TestInplaceStringBuilder(t *testing.T) {
 	builder := NewInplaceStringBuilder(10)
 
@@ -93,27 +93,27 @@ func TestInplaceStringBuilder(t *testing.T) {
 	}
 }
 
-// TestFastStringConcat 测试快速字符串拼接
+// TestFastStringConcat Test fast string concatenation
 func TestFastStringConcat(t *testing.T) {
 	result := FastStringConcatZC("Hello", " ", "World", "!")
 	if result != "Hello World!" {
 		t.Errorf("Expected 'Hello World!', got '%s'", result)
 	}
 
-	// 单个字符串
+	// Single string
 	single := FastStringConcatZC("single")
 	if single != "single" {
 		t.Errorf("Expected 'single', got '%s'", single)
 	}
 
-	// 空
+	// Empty
 	empty := FastStringConcatZC()
 	if empty != "" {
 		t.Errorf("Expected empty string, got '%s'", empty)
 	}
 }
 
-// TestTrimSpaceZeroCopy 测试零拷贝去空格
+// TestTrimSpaceZeroCopy Test zero-copy space trimming
 func TestTrimSpaceZeroCopy(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -134,7 +134,7 @@ func TestTrimSpaceZeroCopy(t *testing.T) {
 	}
 }
 
-// TestSplitZeroCopy 测试零拷贝分割
+// TestSplitZeroCopy Test zero-copy splitting
 func TestSplitZeroCopy(t *testing.T) {
 	result := SplitZeroCopy("a,b,c,d", ',')
 	expected := []string{"a", "b", "c", "d"}
@@ -150,7 +150,7 @@ func TestSplitZeroCopy(t *testing.T) {
 	}
 }
 
-// TestJoinZeroCopy 测试零拷贝连接
+// TestJoinZeroCopy Test zero-copy joining
 func TestJoinZeroCopy(t *testing.T) {
 	parts := []string{"a", "b", "c", "d"}
 	result := JoinZeroCopy(parts, ",")
@@ -159,20 +159,20 @@ func TestJoinZeroCopy(t *testing.T) {
 		t.Errorf("Expected 'a,b,c,d', got '%s'", result)
 	}
 
-	// 单个元素
+	// Single element
 	single := JoinZeroCopy([]string{"single"}, ",")
 	if single != "single" {
 		t.Errorf("Expected 'single', got '%s'", single)
 	}
 
-	// 空
+	// Empty
 	empty := JoinZeroCopy([]string{}, ",")
 	if empty != "" {
 		t.Errorf("Expected empty string, got '%s'", empty)
 	}
 }
 
-// TestHasPrefixSuffixZeroCopy 测试前缀后缀检查
+// TestHasPrefixSuffixZeroCopy Test prefix suffix checking
 func TestHasPrefixSuffixZeroCopy(t *testing.T) {
 	str := "hello world"
 
@@ -193,7 +193,7 @@ func TestHasPrefixSuffixZeroCopy(t *testing.T) {
 	}
 }
 
-// BenchmarkStringOperations 对比标准库和零拷贝版本的性能
+// BenchmarkStringOperations Compare performance of standard library and zero-copy versions
 func BenchmarkStringOperations(b *testing.B) {
 	b.Run("BytesToString/Standard", func(b *testing.B) {
 		bytes := []byte("hello world this is a test string")
@@ -281,7 +281,7 @@ func BenchmarkStringOperations(b *testing.B) {
 	})
 }
 
-// ExampleStringBuffer 演示 StringBuffer 的使用
+// ExampleStringBuffer Demonstrate usage of StringBuffer
 func ExampleStringBuffer() {
 	builder := NewStringBuffer(100)
 
@@ -294,29 +294,29 @@ func ExampleStringBuffer() {
 	// Output: Hello World
 }
 
-// ExampleFastStringConcatZC 演示快速字符串拼接
+// ExampleFastStringConcatZC Demonstrate fast string concatenation
 func ExampleFastStringConcatZC() {
 	result := FastStringConcatZC("Hello", " ", "World", "!")
 	fmt.Println(result)
 	// Output: Hello World!
 }
 
-// ExampleStringPool 演示字符串池的使用
+// ExampleStringPool Demonstrate usage of string pool
 func ExampleStringPool() {
 	pool := NewStringPool()
 
-	// 常用字符串放入池中
+	// Put commonly used strings into the pool
 	fontName1 := pool.Intern("Arial")
-	fontName2 := pool.Intern("Arial") // 重复的字符串会复用
+	fontName2 := pool.Intern("Arial") // Repeated strings will be reused
 
-	fmt.Println(fontName1 == fontName2) // 指针相等
+	fmt.Println(fontName1 == fontName2) // Pointers are equal
 	fmt.Println(pool.Size())
 	// Output:
 	// true
 	// 1
 }
 
-// ExampleTrimSpaceZeroCopy 演示零拷贝去空格
+// ExampleTrimSpaceZeroCopy Demonstrate zero-copy space trimming
 func ExampleTrimSpaceZeroCopy() {
 	str := "   hello world   "
 	result := TrimSpaceZeroCopy(str)
@@ -324,7 +324,7 @@ func ExampleTrimSpaceZeroCopy() {
 	// Output: hello world
 }
 
-// ExampleSplitZeroCopy 演示零拷贝分割
+// ExampleSplitZeroCopy Demonstrate zero-copy splitting
 func ExampleSplitZeroCopy() {
 	str := "a,b,c,d"
 	parts := SplitZeroCopy(str, ',')
@@ -338,7 +338,7 @@ func ExampleSplitZeroCopy() {
 	// d
 }
 
-// ExampleJoinZeroCopy 演示零拷贝连接
+// ExampleJoinZeroCopy Demonstrate zero-copy joining
 func ExampleJoinZeroCopy() {
 	parts := []string{"apple", "banana", "cherry"}
 	result := JoinZeroCopy(parts, ", ")
@@ -346,20 +346,20 @@ func ExampleJoinZeroCopy() {
 	// Output: apple, banana, cherry
 }
 
-// 演示在实际 PDF 处理中如何使用零拷贝优化
+// Demonstrate how to use zero-copy optimization in actual PDF processing
 func Example_zeroCopyInPDFProcessing() {
-	// 假设从 PDF 提取了一些文本块
+	// Assume some text blocks are extracted from PDF
 	texts := []string{
 		"  First paragraph  ",
 		"  Second paragraph  ",
 		"  Third paragraph  ",
 	}
 
-	// 使用零拷贝操作处理
+	// Process using zero-copy operations
 	builder := NewStringBuffer(1024)
 
 	for i, text := range texts {
-		// 去除首尾空格（零拷贝）
+		// Remove leading and trailing spaces (zero-copy)
 		trimmed := TrimSpaceZeroCopy(text)
 		builder.WriteString(trimmed)
 

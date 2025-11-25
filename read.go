@@ -122,7 +122,7 @@ func (fc *FontCache) Set(key string, font *Font) {
 	fc.fonts[key] = font
 }
 
-// P2优化: 全局多级缓存实例
+// P2 optimization: global multi-level cache instance
 var (
 	globalMultiLevelCache = NewMultiLevelCache()
 	globalFontCache       = NewFontCache()
@@ -1497,33 +1497,33 @@ func (r *cbcReader) Read(b []byte) (n int, err error) {
 	return n, nil
 }
 
-// ExtractAllPagesParallel 使用增强的并行提取器提取所有页面文本
-// 这个方法集成了所有性能优化：分片缓存、字体预取、零拷贝等
+// ExtractAllPagesParallel extract all page texts using enhanced parallel extractor
+// This method integrates all performance optimizations: sharded cache, font prefetch, zero-copy, etc.
 func (r *Reader) ExtractAllPagesParallel(ctx context.Context, workers int) ([]string, error) {
 	if workers <= 0 {
 		workers = runtime.NumCPU()
 	}
 
-	// 创建并行提取器
+	// Create parallel extractor
 	extractor := NewParallelExtractor(workers)
 	defer extractor.Close()
 
-	// 收集所有页面
+	// Collect all pages
 	numPages := r.NumPage()
 	pages := make([]Page, numPages)
 	for i := 0; i < numPages; i++ {
 		pages[i] = r.Page(i + 1)
-		// 为每个页面设置字体缓存（使用提取器的优化缓存）
+		// Set font cache for each page (using extractor's optimized cache)
 		pages[i].SetFontCacheInterface(extractor.prefetcher.cache)
 	}
 
-	// 并行提取所有页面
+	// Parallel extract all pages
 	textsPerPage, err := extractor.ExtractAllPages(ctx, pages)
 	if err != nil {
 		return nil, err
 	}
 
-	// 将每页的文本块合并为字符串
+	// Merge text blocks of each page into string
 	results := make([]string, len(textsPerPage))
 	for i, texts := range textsPerPage {
 		if len(texts) == 0 {
@@ -1531,13 +1531,13 @@ func (r *Reader) ExtractAllPagesParallel(ctx context.Context, workers int) ([]st
 			continue
 		}
 
-		// 计算总长度
+		// Calculate total length
 		totalLen := 0
 		for _, t := range texts {
 			totalLen += len(t.S) + 1 // +1 for space
 		}
 
-		// 使用零拷贝字符串构建
+		// Use zero-copy string building
 		builder := NewStringBuffer(totalLen)
 		for j, t := range texts {
 			builder.WriteString(t.S)

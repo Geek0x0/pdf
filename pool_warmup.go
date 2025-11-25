@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 )
 
-// PoolWarmer 内存池预热器
-// 在应用启动时预先分配和填充内存池，减少运行时分配开销
+// PoolWarmer memory pool warmer
+// Pre-allocate and fill memory pools at application startup to reduce runtime allocation overhead
 type PoolWarmer struct {
 	bytePool     *SizedBytePool
 	textPool     *SizedTextSlicePool
@@ -20,7 +20,7 @@ type PoolWarmer struct {
 	warmingMutex sync.Mutex
 }
 
-// GlobalPoolWarmer 全局池预热器实例
+// GlobalPoolWarmer global pool warmer instance
 var GlobalPoolWarmer = &PoolWarmer{
 	bytePool: globalSizedBytePool,
 	textPool: globalSizedTextSlicePool,
@@ -30,22 +30,22 @@ func init() {
 	GlobalPoolWarmer.warmed.Store(false)
 }
 
-// WarmupConfig 预热配置
+// WarmupConfig warmup configuration
 type WarmupConfig struct {
-	// BytePoolWarmup 每个大小桶预热的缓冲区数量
+	// BytePoolWarmup number of buffers to warmup for each size bucket
 	BytePoolWarmup map[int]int
 
-	// TextPoolWarmup 每个大小桶预热的文本切片数量
+	// TextPoolWarmup number of text slices to warmup for each size bucket
 	TextPoolWarmup map[int]int
 
-	// Concurrent 是否并发预热
+	// Concurrent whether to warmup concurrently
 	Concurrent bool
 
-	// MaxGoroutines 最大并发 goroutine 数
+	// MaxGoroutines maximum number of concurrent goroutines
 	MaxGoroutines int
 }
 
-// DefaultWarmupConfig 返回默认预热配置
+// DefaultWarmupConfig returns default warmup configuration
 func DefaultWarmupConfig() *WarmupConfig {
 	return &WarmupConfig{
 		BytePoolWarmup: map[int]int{
@@ -71,7 +71,7 @@ func DefaultWarmupConfig() *WarmupConfig {
 	}
 }
 
-// AggressiveWarmupConfig 返回激进的预热配置（更多预分配）
+// AggressiveWarmupConfig returns aggressive warmup configuration (more pre-allocation)
 func AggressiveWarmupConfig() *WarmupConfig {
 	return &WarmupConfig{
 		BytePoolWarmup: map[int]int{
@@ -97,7 +97,7 @@ func AggressiveWarmupConfig() *WarmupConfig {
 	}
 }
 
-// LightWarmupConfig 返回轻量预热配置（较少预分配）
+// LightWarmupConfig returns light warmup configuration (less pre-allocation)
 func LightWarmupConfig() *WarmupConfig {
 	return &WarmupConfig{
 		BytePoolWarmup: map[int]int{
@@ -123,13 +123,13 @@ func LightWarmupConfig() *WarmupConfig {
 	}
 }
 
-// Warmup 执行内存池预热
+// Warmup performs memory pool warmup
 func (pw *PoolWarmer) Warmup(config *WarmupConfig) error {
 	pw.warmingMutex.Lock()
 	defer pw.warmingMutex.Unlock()
 
 	if pw.IsWarmed() {
-		return nil // 已经预热过了
+		return nil // already warmed up
 	}
 
 	if config == nil {
@@ -146,39 +146,39 @@ func (pw *PoolWarmer) Warmup(config *WarmupConfig) error {
 	return nil
 }
 
-// warmupSequential 顺序预热
+// warmupSequential sequential warmup
 func (pw *PoolWarmer) warmupSequential(config *WarmupConfig) {
-	// 预热字节池
+	// warmup byte pool
 	for size, count := range config.BytePoolWarmup {
 		buffers := make([][]byte, count)
 		for i := 0; i < count; i++ {
 			buffers[i] = pw.bytePool.Get(size)
 		}
-		// 返回到池中
+		// return to pool
 		for _, buf := range buffers {
 			pw.bytePool.Put(buf)
 		}
 	}
 
-	// 预热文本切片池
+	// warmup text slice pool
 	for size, count := range config.TextPoolWarmup {
 		slices := make([][]Text, count)
 		for i := 0; i < count; i++ {
 			slices[i] = pw.textPool.Get(size)
 		}
-		// 返回到池中
+		// return to pool
 		for _, slice := range slices {
 			pw.textPool.Put(slice)
 		}
 	}
 }
 
-// warmupConcurrent 并发预热
+// warmupConcurrent concurrent warmup
 func (pw *PoolWarmer) warmupConcurrent(config *WarmupConfig) {
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, config.MaxGoroutines)
 
-	// 并发预热字节池
+	// concurrent warmup byte pool
 	for size, count := range config.BytePoolWarmup {
 		wg.Add(1)
 		semaphore <- struct{}{}
@@ -197,7 +197,7 @@ func (pw *PoolWarmer) warmupConcurrent(config *WarmupConfig) {
 		}(size, count)
 	}
 
-	// 并发预热文本切片池
+	// concurrent warmup text slice pool
 	for size, count := range config.TextPoolWarmup {
 		wg.Add(1)
 		semaphore <- struct{}{}
@@ -219,30 +219,30 @@ func (pw *PoolWarmer) warmupConcurrent(config *WarmupConfig) {
 	wg.Wait()
 }
 
-// IsWarmed 检查是否已预热
+// IsWarmed checks if warmed up
 func (pw *PoolWarmer) IsWarmed() bool {
 	warmed, ok := pw.warmed.Load().(bool)
 	return ok && warmed
 }
 
-// Reset 重置预热状态
+// Reset resets warmup state
 func (pw *PoolWarmer) Reset() {
 	pw.warmingMutex.Lock()
 	defer pw.warmingMutex.Unlock()
 	pw.warmed.Store(false)
 }
 
-// WarmupGlobal 预热全局内存池（便捷函数）
+// WarmupGlobal warms up global memory pool (convenience function)
 func WarmupGlobal(config *WarmupConfig) error {
 	return GlobalPoolWarmer.Warmup(config)
 }
 
-// AutoWarmup 自动预热（根据可用内存选择配置）
+// AutoWarmup automatic warmup (selects config based on available memory)
 func AutoWarmup() error {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	// 根据可用内存选择配置
+	// select config based on available memory
 	var config *WarmupConfig
 	if ms.Sys > 1024*1024*1024 { // > 1GB
 		config = AggressiveWarmupConfig()
@@ -255,7 +255,7 @@ func AutoWarmup() error {
 	return GlobalPoolWarmer.Warmup(config)
 }
 
-// PreallocateCache 预分配缓存（附加功能）
+// PreallocateCache pre-allocates cache (additional feature)
 func PreallocateCache(fontCacheSize, resultCacheSize int) {
 	if fontCacheSize > 0 {
 		_ = NewOptimizedFontCache(fontCacheSize)
@@ -265,7 +265,7 @@ func PreallocateCache(fontCacheSize, resultCacheSize int) {
 	}
 }
 
-// WarmupStats 预热统计信息
+// WarmupStats warmup statistics
 type WarmupStats struct {
 	BytePoolSizes  map[int]int
 	TextPoolSizes  map[int]int
@@ -273,47 +273,47 @@ type WarmupStats struct {
 	IsWarmed       bool
 }
 
-// GetWarmupStats 获取预热统计信息
+// GetWarmupStats gets warmup statistics
 func (pw *PoolWarmer) GetWarmupStats() WarmupStats {
 	return WarmupStats{
 		IsWarmed: pw.IsWarmed(),
 	}
 }
 
-// OptimizedStartup 优化启动流程
-// 包括池预热、缓存预分配等
+// OptimizedStartup optimized startup process
+// includes pool warmup, cache pre-allocation, etc.
 func OptimizedStartup(config *StartupConfig) error {
 	if config == nil {
 		config = DefaultStartupConfig()
 	}
 
-	// 1. 预热内存池
+	// 1. warmup memory pools
 	if config.WarmupPools {
 		if err := GlobalPoolWarmer.Warmup(config.WarmupConfig); err != nil {
 			return err
 		}
 	}
 
-	// 2. 预分配缓存
+	// 2. pre-allocate caches
 	if config.PreallocateCaches {
 		PreallocateCache(config.FontCacheSize, config.ResultCacheSize)
 	}
 
-	// 3. 调整 GC 参数
+	// 3. adjust GC parameters
 	if config.TuneGC {
-		// 设置 GC 目标百分比（默认 100）
-		// 更高的值会减少 GC 频率但增加内存使用
+		// set GC target percentage (default 100)
+		// higher values reduce GC frequency but increase memory usage
 		if config.GCPercent > 0 {
 			debug.SetGCPercent(config.GCPercent)
 		}
 
-		// 预留内存以减少 GC 压力
+		// reserve memory to reduce GC pressure
 		if config.MemoryBallast > 0 {
 			_ = make([]byte, config.MemoryBallast)
 		}
 	}
 
-	// 4. 设置 GOMAXPROCS
+	// 4. set GOMAXPROCS
 	if config.SetMaxProcs {
 		if config.MaxProcs <= 0 {
 			config.MaxProcs = runtime.NumCPU()
@@ -324,7 +324,7 @@ func OptimizedStartup(config *StartupConfig) error {
 	return nil
 }
 
-// StartupConfig 启动配置
+// StartupConfig startup configuration
 type StartupConfig struct {
 	WarmupPools       bool
 	WarmupConfig      *WarmupConfig
@@ -338,7 +338,7 @@ type StartupConfig struct {
 	MaxProcs          int
 }
 
-// DefaultStartupConfig 默认启动配置
+// DefaultStartupConfig default startup configuration
 func DefaultStartupConfig() *StartupConfig {
 	return &StartupConfig{
 		WarmupPools:       true,
@@ -347,9 +347,9 @@ func DefaultStartupConfig() *StartupConfig {
 		FontCacheSize:     1000,
 		ResultCacheSize:   10000,
 		TuneGC:            true,
-		GCPercent:         200,              // 减少 GC 频率
+		GCPercent:         200,              // reduce GC frequency
 		MemoryBallast:     10 * 1024 * 1024, // 10MB ballast
 		SetMaxProcs:       true,
-		MaxProcs:          0, // 自动检测
+		MaxProcs:          0, // auto-detect
 	}
 }

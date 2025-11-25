@@ -199,8 +199,8 @@ func (e *Extractor) extractPlainText(pages []int) (string, error) {
 
 // extractPlainTextSequential extracts text sequentially
 func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
-	// 使用零拷贝 StringBuffer 优化性能
-	// 预估容量: 平均每页2KB
+	// Use zero-copy StringBuffer for performance optimization
+	// Estimated capacity: average 2KB per page
 	estimatedSize := len(pages) * 2048
 	builder := GetSizedStringBuilder(estimatedSize)
 	defer PutSizedStringBuilder(builder, estimatedSize)
@@ -239,7 +239,7 @@ func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
 		page.Cleanup()
 	}
 
-	// 返回副本（因为 builder 会被重用）
+	// Return copy (because builder will be reused)
 	return builder.String(), nil
 }
 

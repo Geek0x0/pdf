@@ -9,23 +9,23 @@ import (
 	"time"
 )
 
-// ==================== 自适应容量估算器测试 ====================
+// ==================== Adaptive Capacity Estimator Test ====================
 
 func TestAdaptiveCapacityEstimator(t *testing.T) {
 	estimator := NewAdaptiveCapacityEstimator(10)
 
-	// 测试无历史数据时的估算
+	// Test estimation without historical data
 	estimated := estimator.Estimate(100)
 	if estimated < 100 {
 		t.Errorf("估算值应大于提示值，got %d", estimated)
 	}
 
-	// 记录一些历史数据
+	// Record some historical data
 	for i := 0; i < 20; i++ {
 		estimator.Record(100 + i*10)
 	}
 
-	// 测试基于历史数据的估算
+	// Test estimation based on historical data
 	estimated = estimator.Estimate(50)
 	t.Logf("基于历史数据估算: %d", estimated)
 }
@@ -42,7 +42,7 @@ func BenchmarkAdaptiveCapacityEstimator(b *testing.B) {
 	}
 }
 
-// ==================== 批量字符串构建器测试 ====================
+// ==================== Batch String Builder Test ====================
 
 func TestBatchStringBuilder(t *testing.T) {
 	texts := []Text{
@@ -114,17 +114,17 @@ func BenchmarkBatchStringBuilderVsTraditional(b *testing.B) {
 	})
 }
 
-// ==================== KD树测试 ====================
+// ==================== KD Tree Test ====================
 
 func TestKDTreeBasic(t *testing.T) {
-	// 创建测试文本块
+	// Create test text blocks
 	blocks := []*TextBlock{
 		{MinX: 0, MaxX: 10, MinY: 0, MaxY: 10},
 		{MinX: 20, MaxX: 30, MinY: 20, MaxY: 30},
 		{MinX: 5, MaxX: 15, MinY: 5, MaxY: 15},
 	}
 
-	// 构建KD树
+	// Build KD tree
 	tree := BuildKDTree(blocks)
 	if tree.root == nil {
 		t.Error("KD树构建失败")
@@ -132,7 +132,7 @@ func TestKDTreeBasic(t *testing.T) {
 }
 
 func TestKDTreeRangeSearch(t *testing.T) {
-	// 创建测试数据
+	// Create test data
 	blocks := []*TextBlock{
 		{MinX: 0, MaxX: 10, MinY: 0, MaxY: 10},
 		{MinX: 100, MaxX: 110, MinY: 100, MaxY: 110},
@@ -142,7 +142,7 @@ func TestKDTreeRangeSearch(t *testing.T) {
 
 	tree := BuildKDTree(blocks)
 
-	// 在(7.5, 7.5)附近搜索，半径100
+	// Search near (7.5, 7.5), radius 100
 	results := tree.RangeSearch([]float64{7.5, 7.5}, 100)
 
 	t.Logf("找到 %d 个近邻块", len(results))
@@ -152,7 +152,7 @@ func TestKDTreeRangeSearch(t *testing.T) {
 }
 
 func BenchmarkKDTreeBuild(b *testing.B) {
-	// 生成1000个随机文本块
+	// Generate 1000 random text blocks
 	blocks := make([]*TextBlock, 1000)
 	for i := range blocks {
 		x := float64(i * 10)
@@ -172,7 +172,7 @@ func BenchmarkKDTreeBuild(b *testing.B) {
 }
 
 func BenchmarkKDTreeRangeSearch(b *testing.B) {
-	// 构建包含1000个块的KD树
+	// Build KD tree containing 1000 blocks
 	blocks := make([]*TextBlock, 1000)
 	for i := range blocks {
 		x := float64(i * 10)
@@ -192,10 +192,10 @@ func BenchmarkKDTreeRangeSearch(b *testing.B) {
 	}
 }
 
-// ==================== 聚类优化对比测试 ====================
+// ==================== Clustering Optimization Comparison Test ====================
 
 func BenchmarkClusteringComparison(b *testing.B) {
-	// 生成测试数据
+	// Generate test data
 	texts := make([]Text, 500)
 	for i := range texts {
 		texts[i] = Text{
@@ -220,7 +220,7 @@ func BenchmarkClusteringComparison(b *testing.B) {
 	})
 }
 
-// ==================== 工作窃取调度器测试 ====================
+// ==================== Work Stealing Scheduler Test ====================
 
 type testTask struct {
 	id     int
@@ -229,7 +229,7 @@ type testTask struct {
 
 func (t *testTask) Execute() error {
 	*t.result = t.id * 2
-	time.Sleep(time.Microsecond) // 模拟工作
+	time.Sleep(time.Microsecond) // Simulate work
 	return nil
 }
 
@@ -238,7 +238,7 @@ func TestWorkStealingScheduler(t *testing.T) {
 	scheduler.Start()
 	defer scheduler.Stop()
 
-	// 提交100个任务
+	// Submit 100 tasks
 	results := make([]int, 100)
 	for i := 0; i < 100; i++ {
 		task := &testTask{id: i, result: &results[i]}
@@ -247,7 +247,7 @@ func TestWorkStealingScheduler(t *testing.T) {
 
 	scheduler.Wait()
 
-	// 验证结果
+	// Verify results
 	for i, r := range results {
 		if r != i*2 {
 			t.Errorf("任务 %d 结果错误: expected %d, got %d", i, i*2, r)
@@ -294,12 +294,12 @@ func BenchmarkSchedulerComparison(b *testing.B) {
 	})
 }
 
-// ==================== 多级缓存测试 ====================
+// ==================== Multi-level Cache Test ====================
 
 func TestMultiLevelCache(t *testing.T) {
 	cache := NewMultiLevelCache()
 
-	// 测试存储和检索
+	// Test storage and retrieval
 	cache.Put("key1", "value1")
 
 	val, ok := cache.Get("key1")
@@ -310,7 +310,7 @@ func TestMultiLevelCache(t *testing.T) {
 		t.Errorf("值不匹配: expected 'value1', got '%v'", val)
 	}
 
-	// 测试缓存未命中
+	// Test cache miss
 	_, ok = cache.Get("nonexistent")
 	if ok {
 		t.Error("不应该找到不存在的key")
@@ -320,17 +320,17 @@ func TestMultiLevelCache(t *testing.T) {
 func TestMultiLevelCacheStats(t *testing.T) {
 	cache := NewMultiLevelCache()
 
-	// 写入一些数据
+	// Write some data
 	for i := 0; i < 10; i++ {
 		cache.Put(string(rune('a'+i)), i)
 	}
 
-	// 读取数据（应该命中L1）
+	// Read data (should hit L1)
 	for i := 0; i < 10; i++ {
 		cache.Get(string(rune('a' + i)))
 	}
 
-	// 读取不存在的数据
+	// Read non-existent data
 	cache.Get("nonexistent")
 
 	stats := cache.Stats()
@@ -344,7 +344,7 @@ func TestMultiLevelCacheStats(t *testing.T) {
 func BenchmarkMultiLevelCache(b *testing.B) {
 	cache := NewMultiLevelCache()
 
-	// 预填充缓存
+	// Pre-fill cache
 	for i := 0; i < 1000; i++ {
 		cache.Put(string(rune(i)), i)
 	}
@@ -389,17 +389,17 @@ func BenchmarkCacheComparison(b *testing.B) {
 	})
 }
 
-// ==================== 性能指标测试 ====================
+// ==================== Performance Metrics Test ====================
 
 func TestPerformanceMetrics(t *testing.T) {
 	metrics := &PerformanceMetrics{}
 
-	// 记录一些指标
+	// Record some metrics
 	metrics.RecordExtractDuration(100 * time.Millisecond)
 	metrics.RecordAllocation(1024)
 	metrics.RecordAllocation(2048)
 
-	// 获取指标
+	// Get metrics
 	m := metrics.GetMetrics()
 	t.Logf("性能指标: %+v", m)
 
@@ -416,12 +416,12 @@ func TestPerformanceMetrics(t *testing.T) {
 	}
 }
 
-// ==================== 集成性能对比测试 ====================
+// ==================== Integrated Performance Comparison Test ====================
 
 func BenchmarkOptimizationImpact(b *testing.B) {
-	// 这个基准测试对比优化前后的性能
+	// This benchmark compares performance before and after optimization
 
-	// 生成测试数据
+	// Generate test data
 	texts := make([]Text, 1000)
 	for i := range texts {
 		texts[i] = Text{
@@ -435,13 +435,13 @@ func BenchmarkOptimizationImpact(b *testing.B) {
 	}
 
 	b.Run("WithOptimizations", func(b *testing.B) {
-		// 使用优化版本
+		// Use optimized version
 		estimator := NewAdaptiveCapacityEstimator(50)
 		cache := NewMultiLevelCache()
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			// 模拟优化的文本提取流程
+			// Simulate optimized text extraction process
 			cap := estimator.Estimate(len(texts))
 			result := make([]Text, 0, cap)
 
@@ -460,7 +460,7 @@ func BenchmarkOptimizationImpact(b *testing.B) {
 	})
 
 	b.Run("WithoutOptimizations", func(b *testing.B) {
-		// 不使用优化
+		// Without optimizations
 		var result []Text
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {

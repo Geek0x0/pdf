@@ -322,14 +322,14 @@ func (b *buffer) readKeyword() token {
 	case isInteger(s):
 		x, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			// 损坏输入时回退为普通关键字，避免 panic
+			// When input is corrupted, fall back to regular keyword to avoid panic
 			return keyword(string(tmp))
 		}
 		return x
 	case isReal(s):
 		x, err := strconv.ParseFloat(s, 64)
 		if err != nil {
-			// 损坏输入时回退为普通关键字，避免 panic
+			// When input is corrupted, fall back to regular keyword to avoid panic
 			return keyword(string(tmp))
 		}
 		return x
@@ -498,7 +498,7 @@ func (b *buffer) readDict() object {
 		}
 		n, ok := tok.(name)
 		if !ok {
-			// 遇到非 name key，可能是损坏或缺失 ">>"/"stream"，回退并结束当前字典，避免 panic
+			// When encountering non-name key, possibly corrupted or missing ">>"/"stream", fall back and end current dictionary to avoid panic
 			b.unreadToken(tok)
 			break
 		}
@@ -523,7 +523,7 @@ func (b *buffer) readDict() object {
 	case '\n':
 		// ok
 	default:
-		// 部分损坏 PDF 在 stream 后缺少换行，容忍并回退一个字节将其视为数据开始
+		// Some corrupted PDFs lack newline after stream, tolerate and fall back one byte to treat it as data start
 		b.unreadByte()
 	}
 

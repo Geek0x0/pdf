@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// FontPrefetcher 实现智能字体预取策略
-// 基于访问模式预测和预加载可能需要的字体
+// FontPrefetcher implements intelligent font prefetch strategy
+// Based on access pattern prediction and preloading potentially needed fonts
 type FontPrefetcher struct {
 	cache         *OptimizedFontCache
 	accessPattern *AccessPatternTracker
@@ -22,38 +22,38 @@ type FontPrefetcher struct {
 	stopChan      chan struct{}
 }
 
-// AccessPatternTracker 跟踪字体访问模式
+// AccessPatternTracker tracks font access patterns
 type AccessPatternTracker struct {
 	mu       sync.RWMutex
 	patterns map[string]*AccessPattern
 	maxSize  int
 }
 
-// AccessPattern 记录单个字体的访问模式
+// AccessPattern records access pattern of single font
 type AccessPattern struct {
 	fontKey      string
 	accessCount  uint64
 	lastAccess   time.Time
 	avgInterval  time.Duration
-	relatedFonts map[string]int // 经常一起访问的字体及其权重
-	predictNext  time.Time      // 预测下次访问时间
+	relatedFonts map[string]int // fonts frequently accessed together and their weights
+	predictNext  time.Time      // predicted next access time
 }
 
-// PrefetchQueue 预取队列（优先级队列）
+// PrefetchQueue prefetch queue (priority queue)
 type PrefetchQueue struct {
 	mu    sync.Mutex
 	items []*PrefetchItem
 }
 
-// PrefetchItem 预取项
+// PrefetchItem prefetch item
 type PrefetchItem struct {
 	fontKey  string
-	priority float64 // 优先级（越高越重要）
+	priority float64 // priority (higher is more important)
 	deadline time.Time
 	index    int
 }
 
-// NewFontPrefetcher 创建新的字体预取器
+// NewFontPrefetcher create new font prefetcher
 func NewFontPrefetcher(cache *OptimizedFontCache) *FontPrefetcher {
 	fp := &FontPrefetcher{
 		cache: cache,
@@ -68,13 +68,13 @@ func NewFontPrefetcher(cache *OptimizedFontCache) *FontPrefetcher {
 	}
 	fp.enabled.Store(true)
 
-	// 启动后台预取协程
+	// Start background prefetch goroutine
 	go fp.prefetchWorker()
 
 	return fp
 }
 
-// RecordAccess 记录字体访问
+// RecordAccess record font access
 func (fp *FontPrefetcher) RecordAccess(fontKey string, relatedKeys []string) {
 	if !fp.isEnabled() {
 		return
@@ -90,9 +90,9 @@ func (fp *FontPrefetcher) RecordAccess(fontKey string, relatedKeys []string) {
 		}
 		fp.accessPattern.patterns[fontKey] = pattern
 
-		// 限制模式数量
+		// Limit pattern count
 		if len(fp.accessPattern.patterns) > fp.accessPattern.maxSize {
-			// 删除最旧的模式
+			// Delete oldest pattern
 			oldest := ""
 			oldestTime := time.Now()
 			for k, p := range fp.accessPattern.patterns {
@@ -109,28 +109,28 @@ func (fp *FontPrefetcher) RecordAccess(fontKey string, relatedKeys []string) {
 
 	now := time.Now()
 
-	// 更新访问计数
+	// Update access count
 	pattern.accessCount++
 
-	// 计算平均访问间隔
+	// Calculate average access interval
 	if !pattern.lastAccess.IsZero() {
 		interval := now.Sub(pattern.lastAccess)
 		if pattern.avgInterval == 0 {
 			pattern.avgInterval = interval
 		} else {
-			// 指数移动平均
+			// Exponential moving average
 			pattern.avgInterval = time.Duration(
 				0.7*float64(pattern.avgInterval) + 0.3*float64(interval),
 			)
 		}
 
-		// 预测下次访问时间
+		// Predict next access time
 		pattern.predictNext = now.Add(pattern.avgInterval)
 	}
 
 	pattern.lastAccess = now
 
-	// 更新关联字体
+	// Update related fonts
 	for _, relatedKey := range relatedKeys {
 		if relatedKey != fontKey {
 			pattern.relatedFonts[relatedKey]++
@@ -139,11 +139,11 @@ func (fp *FontPrefetcher) RecordAccess(fontKey string, relatedKeys []string) {
 
 	fp.accessPattern.mu.Unlock()
 
-	// 触发预取决策（在锁外调用）
+	// Trigger prefetch decision (called outside lock)
 	fp.schedulePrefetch(fontKey)
 }
 
-// schedulePrefetch 安排预取
+// schedulePrefetch arrange prefetch
 func (fp *FontPrefetcher) schedulePrefetch(fontKey string) {
 	fp.accessPattern.mu.RLock()
 	pattern, exists := fp.accessPattern.patterns[fontKey]
@@ -153,27 +153,27 @@ func (fp *FontPrefetcher) schedulePrefetch(fontKey string) {
 		return
 	}
 
-	// 为关联字体计算预取优先级
+	// Calculate prefetch priority for related fonts
 	for relatedKey, weight := range pattern.relatedFonts {
-		// 检查是否已在缓存中
+		// Check if already in cache
 		if _, cached := fp.cache.Get(relatedKey); cached {
 			continue
 		}
 
-		// 计算优先级：访问权重 * 时间因子
+		// Calculate priority: access weight * time factor
 		priority := float64(weight)
 
-		// 需要再次加锁访问其他 pattern
+		// Need to lock again to access other patterns
 		fp.accessPattern.mu.RLock()
 		if relatedPattern, ok := fp.accessPattern.patterns[relatedKey]; ok {
-			// 如果预测即将被访问，提高优先级
+			// If predicted to be accessed soon, increase priority
 			if time.Until(relatedPattern.predictNext) < time.Second {
 				priority *= 2.0
 			}
 		}
 		fp.accessPattern.mu.RUnlock()
 
-		// 添加到预取队列
+		// Add to prefetch queue
 		fp.enqueuePrefetch(&PrefetchItem{
 			fontKey:  relatedKey,
 			priority: priority,
@@ -182,15 +182,15 @@ func (fp *FontPrefetcher) schedulePrefetch(fontKey string) {
 	}
 }
 
-// enqueuePrefetch 将项目加入预取队列
+// enqueuePrefetch adds item to prefetch queue
 func (fp *FontPrefetcher) enqueuePrefetch(item *PrefetchItem) {
 	fp.prefetchQueue.mu.Lock()
 	defer fp.prefetchQueue.mu.Unlock()
 
-	// 检查是否已存在
+	// Check if already exists
 	for _, existing := range fp.prefetchQueue.items {
 		if existing.fontKey == item.fontKey {
-			// 更新优先级
+			// Update priority
 			if item.priority > existing.priority {
 				existing.priority = item.priority
 				heap.Fix(fp.prefetchQueue, existing.index)
@@ -199,11 +199,11 @@ func (fp *FontPrefetcher) enqueuePrefetch(item *PrefetchItem) {
 		}
 	}
 
-	// 添加新项目
+	// Add new item
 	heap.Push(fp.prefetchQueue, item)
 }
 
-// prefetchWorker 后台预取工作协程
+// prefetchWorker background prefetch worker goroutine
 func (fp *FontPrefetcher) prefetchWorker() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -221,31 +221,31 @@ func (fp *FontPrefetcher) prefetchWorker() {
 	}
 }
 
-// processPrefetchQueue 处理预取队列
+// processPrefetchQueue processes prefetch queue
 func (fp *FontPrefetcher) processPrefetchQueue() {
 	fp.prefetchQueue.mu.Lock()
 
-	// 最多每次处理 5 个项目
+	// Process at most 5 items per batch
 	batchSize := 5
 	for i := 0; i < batchSize && fp.prefetchQueue.Len() > 0; i++ {
 		item := heap.Pop(fp.prefetchQueue).(*PrefetchItem)
 		fp.prefetchQueue.mu.Unlock()
 
-		// 检查是否过期
+		// Check if expired
 		if time.Now().After(item.deadline) {
 			fp.prefetchQueue.mu.Lock()
 			continue
 		}
 
-		// 检查是否已在缓存中
+		// Check if already in cache
 		if _, cached := fp.cache.Get(item.fontKey); cached {
 			fp.prefetchQueue.mu.Lock()
 			continue
 		}
 
-		// 这里应该实际加载字体，但由于我们不知道如何加载，
-		// 所以只是记录预取意图
-		// 在实际应用中，这里会调用字体加载函数
+		// Here should actually load the font, but since we don't know how to load,
+		// just record the prefetch intent
+		// In real applications, this would call the font loading function
 
 		fp.prefetchQueue.mu.Lock()
 	}
@@ -253,22 +253,22 @@ func (fp *FontPrefetcher) processPrefetchQueue() {
 	fp.prefetchQueue.mu.Unlock()
 }
 
-// Enable 启用预取
+// Enable enables prefetching
 func (fp *FontPrefetcher) Enable() {
 	fp.enabled.Store(true)
 }
 
-// Disable 禁用预取
+// Disable disables prefetching
 func (fp *FontPrefetcher) Disable() {
 	fp.enabled.Store(false)
 }
 
-// isEnabled 检查是否启用
+// isEnabled checks if enabled
 func (fp *FontPrefetcher) isEnabled() bool {
 	return fp.enabled.Load().(bool)
 }
 
-// GetStats 获取预取统计信息
+// GetStats gets prefetch statistics
 func (fp *FontPrefetcher) GetStats() PrefetchStats {
 	fp.accessPattern.mu.RLock()
 	patternsCount := len(fp.accessPattern.patterns)
@@ -285,33 +285,33 @@ func (fp *FontPrefetcher) GetStats() PrefetchStats {
 	}
 }
 
-// PrefetchStats 预取统计信息
+// PrefetchStats prefetch statistics
 type PrefetchStats struct {
 	PatternsTracked int
 	QueueSize       int
 	Enabled         bool
 }
 
-// ClearPatterns 清除访问模式
+// ClearPatterns clears access patterns
 func (fp *FontPrefetcher) ClearPatterns() {
 	fp.accessPattern.mu.Lock()
 	fp.accessPattern.patterns = make(map[string]*AccessPattern)
 	fp.accessPattern.mu.Unlock()
 }
 
-// Close 关闭预取器
+// Close closes the prefetcher
 func (fp *FontPrefetcher) Close() {
 	close(fp.stopChan)
 }
 
-// 实现 heap.Interface for PrefetchQueue
+// Implement heap.Interface for PrefetchQueue
 
 func (pq *PrefetchQueue) Len() int {
 	return len(pq.items)
 }
 
 func (pq *PrefetchQueue) Less(i, j int) bool {
-	// 优先级高的在前
+	// Higher priority comes first
 	return pq.items[i].priority > pq.items[j].priority
 }
 

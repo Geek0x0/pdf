@@ -15,7 +15,7 @@ func TestFontPrefetcher(t *testing.T) {
 	prefetcher := NewFontPrefetcher(cache)
 	defer prefetcher.Close()
 
-	// 测试基本访问记录
+	// Test basic access recording
 	prefetcher.RecordAccess("font1", []string{"font2", "font3"})
 	prefetcher.RecordAccess("font1", []string{"font2", "font3"})
 
@@ -50,7 +50,7 @@ func TestAccessPatternTracking(t *testing.T) {
 	prefetcher := NewFontPrefetcher(cache)
 	defer prefetcher.Close()
 
-	// 模拟访问模式
+	// Simulate access patterns
 	for i := 0; i < 10; i++ {
 		prefetcher.RecordAccess("mainFont", []string{"relatedFont1", "relatedFont2"})
 		time.Sleep(10 * time.Millisecond)
@@ -61,7 +61,7 @@ func TestAccessPatternTracking(t *testing.T) {
 		t.Error("Expected at least one pattern to be tracked")
 	}
 
-	// 验证访问模式被记录
+	// Verify access patterns are recorded
 	prefetcher.accessPattern.mu.RLock()
 	pattern, exists := prefetcher.accessPattern.patterns["mainFont"]
 	prefetcher.accessPattern.mu.RUnlock()
@@ -84,7 +84,7 @@ func TestPrefetchQueueOperations(t *testing.T) {
 	prefetcher := NewFontPrefetcher(cache)
 	defer prefetcher.Close()
 
-	// 添加一些预取项
+	// Add some prefetch items
 	prefetcher.enqueuePrefetch(&PrefetchItem{
 		fontKey:  "font1",
 		priority: 10.0,
@@ -108,7 +108,7 @@ func TestClearPatterns(t *testing.T) {
 	prefetcher := NewFontPrefetcher(cache)
 	defer prefetcher.Close()
 
-	// 记录一些访问
+	// Record some accesses
 	for i := 0; i < 5; i++ {
 		prefetcher.RecordAccess(fmt.Sprintf("font%d", i), nil)
 	}
@@ -118,7 +118,7 @@ func TestClearPatterns(t *testing.T) {
 		t.Error("Expected patterns to be tracked")
 	}
 
-	// 清除模式
+	// Clear patterns
 	prefetcher.ClearPatterns()
 
 	stats = prefetcher.GetStats()
@@ -133,7 +133,7 @@ func TestPatternMaxSize(t *testing.T) {
 	defer prefetcher.Close()
 	prefetcher.accessPattern.maxSize = 10
 
-	// 记录超过最大数量的模式
+	// Record patterns exceeding maximum count
 	for i := 0; i < 20; i++ {
 		prefetcher.RecordAccess(fmt.Sprintf("font%d", i), nil)
 		time.Sleep(time.Millisecond)

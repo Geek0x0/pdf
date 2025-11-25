@@ -11,68 +11,68 @@ import (
 	"time"
 )
 
-// ShardedCache 实现了一个高性能分片缓存，具有以下特性：
-// - 256 个分片以最小化锁竞争
-// - 每个分片独立的锁和 LRU 链表
-// - 原子操作实现的统计信息
-// - 自适应淘汰策略
+// ShardedCache implements a high-performance sharded cache with the following features:
+// - 256 shards to minimize lock contention
+// - Independent locks and LRU linked lists for each shard
+// - Statistics implemented with atomic operations
+// - Adaptive eviction strategy
 type ShardedCache struct {
 	shards    [256]*CacheShard
 	shardMask uint64
 	maxSize   int
 	ttl       time.Duration
 
-	// 清理控制
+	// Cleanup control
 	stopChan chan struct{}
 	stopped  atomic.Value // bool
 }
 
-// CacheShard 代表缓存的单个分片
+// CacheShard represents a single shard of the cache
 type CacheShard struct {
 	mu      sync.RWMutex
 	items   map[string]*ShardedCacheEntry
-	head    *ShardedCacheEntry // LRU 链表头（最近使用）
-	tail    *ShardedCacheEntry // LRU 链表尾（最久未使用）
+	head    *ShardedCacheEntry // LRU linked list head (most recently used)
+	tail    *ShardedCacheEntry // LRU linked list tail (least recently used)
 	maxSize int
 
-	// 统计信息（原子操作）
+	// Statistics (atomic operations)
 	hits      uint64
 	misses    uint64
 	evictions uint64
 	size      int64
 }
 
-// ShardedCacheEntry 代表缓存条目
+// ShardedCacheEntry represents a cache entry
 type ShardedCacheEntry struct {
 	key        string
 	value      interface{}
 	expiration time.Time
 	size       int64
 
-	// LRU 双向链表
+	// LRU doubly linked list
 	prev *ShardedCacheEntry
 	next *ShardedCacheEntry
 
-	// 访问跟踪（原子操作）
+	// Access tracking (atomic operations)
 	accessCount uint64
 	lastAccess  int64 // Unix nano
 }
 
-// NewShardedCache 创建新的分片缓存
+// NewShardedCache creates a new sharded cache
 func NewShardedCache(maxSize int, ttl time.Duration) *ShardedCache {
 	if maxSize <= 0 {
 		maxSize = 10000
 	}
 
 	sc := &ShardedCache{
-		shardMask: 255, // 256 个分片
+		shardMask: 255, // 256 shards
 		maxSize:   maxSize,
 		ttl:       ttl,
 		stopChan:  make(chan struct{}),
 	}
 	sc.stopped.Store(false)
 
-	// 初始化每个分片
+	// Initialize each shard
 	sizePerShard := maxSize / 256
 	if sizePerShard < 1 {
 		sizePerShard = 1
@@ -85,7 +85,7 @@ func NewShardedCache(maxSize int, ttl time.Duration) *ShardedCache {
 		}
 	}
 
-	// 启动定期清理 goroutine
+	// Start periodic cleanup goroutine
 	if ttl > 0 {
 		go sc.cleanupExpired()
 	}
@@ -93,7 +93,7 @@ func NewShardedCache(maxSize int, ttl time.Duration) *ShardedCache {
 	return sc
 }
 
-// getShard 获取键对应的分片
+// getShard gets the shard corresponding to the key
 func (sc *ShardedCache) getShard(key string) *CacheShard {
 	h := fnv.New64a()
 	h.Write([]byte(key))
@@ -101,7 +101,7 @@ func (sc *ShardedCache) getShard(key string) *CacheShard {
 	return sc.shards[hash&sc.shardMask]
 }
 
-// Get 从缓存获取值
+// Get gets value from cache
 func (sc *ShardedCache) Get(key string) (interface{}, bool) {
 	shard := sc.getShard(key)
 	shard.mu.RLock()
@@ -113,7 +113,7 @@ func (sc *ShardedCache) Get(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	// 检查过期
+	// Check expiration
 	if !entry.expiration.IsZero() && time.Now().After(entry.expiration) {
 		shard.mu.RUnlock()
 		atomic.AddUint64(&shard.misses, 1)
@@ -123,12 +123,12 @@ func (sc *ShardedCache) Get(key string) (interface{}, bool) {
 	value := entry.value
 	shard.mu.RUnlock()
 
-	// 更新访问信息（原子操作）
+	// Update access information (atomic operations)
 	atomic.AddUint64(&entry.accessCount, 1)
 	atomic.StoreInt64(&entry.lastAccess, time.Now().UnixNano())
 	atomic.AddUint64(&shard.hits, 1)
 
-	// 移到 LRU 链表前端
+	// Move to front of LRU linked list
 	shard.mu.Lock()
 	shard.moveToFront(entry)
 	shard.mu.Unlock()
@@ -136,7 +136,7 @@ func (sc *ShardedCache) Get(key string) (interface{}, bool) {
 	return value, true
 }
 
-// Set 设置缓存值
+// Set sets cache value
 func (sc *ShardedCache) Set(key string, value interface{}, size int64) {
 	shard := sc.getShard(key)
 	shard.mu.Lock()
@@ -148,9 +148,9 @@ func (sc *ShardedCache) Set(key string, value interface{}, size int64) {
 		expiration = now.Add(sc.ttl)
 	}
 
-	// 检查是否已存在
+	// Check if already exists
 	if entry, ok := shard.items[key]; ok {
-		// 更新现有条目
+		// Update existing entry
 		oldSize := entry.size
 		entry.value = value
 		entry.size = size
@@ -158,20 +158,20 @@ func (sc *ShardedCache) Set(key string, value interface{}, size int64) {
 		atomic.StoreInt64(&entry.lastAccess, now.UnixNano())
 		atomic.AddUint64(&entry.accessCount, 1)
 
-		// 更新大小统计
+		// Update size statistics
 		atomic.AddInt64(&shard.size, size-oldSize)
 
-		// 移到前端
+		// Move to front
 		shard.moveToFront(entry)
 		return
 	}
 
-	// 检查是否需要淘汰
+	// Check if eviction is needed
 	for len(shard.items) >= shard.maxSize && shard.tail != nil {
 		shard.evictLRU()
 	}
 
-	// 创建新条目
+	// Create new entry
 	entry := &ShardedCacheEntry{
 		key:        key,
 		value:      value,
@@ -186,7 +186,7 @@ func (sc *ShardedCache) Set(key string, value interface{}, size int64) {
 	atomic.AddInt64(&shard.size, size)
 }
 
-// Delete 删除缓存条目
+// Delete deletes cache entry
 func (sc *ShardedCache) Delete(key string) {
 	shard := sc.getShard(key)
 	shard.mu.Lock()
@@ -202,14 +202,14 @@ func (sc *ShardedCache) Delete(key string) {
 	atomic.AddInt64(&shard.size, -entry.size)
 }
 
-// moveToFront 将条目移到 LRU 链表前端
-// 调用者必须持有锁
+// moveToFront moves entry to front of LRU linked list
+// Caller must hold lock
 func (shard *CacheShard) moveToFront(entry *ShardedCacheEntry) {
 	if entry == shard.head {
 		return
 	}
 
-	// 从当前位置移除
+	// Remove from current position
 	if entry.prev != nil {
 		entry.prev.next = entry.next
 	}
@@ -220,7 +220,7 @@ func (shard *CacheShard) moveToFront(entry *ShardedCacheEntry) {
 		shard.tail = entry.prev
 	}
 
-	// 添加到前端
+	// Add to front
 	entry.prev = nil
 	entry.next = shard.head
 	if shard.head != nil {
@@ -233,8 +233,8 @@ func (shard *CacheShard) moveToFront(entry *ShardedCacheEntry) {
 	}
 }
 
-// addToFront 将条目添加到 LRU 链表前端
-// 调用者必须持有锁
+// addToFront adds entry to front of LRU linked list
+// Caller must hold lock
 func (shard *CacheShard) addToFront(entry *ShardedCacheEntry) {
 	entry.prev = nil
 	entry.next = shard.head
@@ -249,8 +249,8 @@ func (shard *CacheShard) addToFront(entry *ShardedCacheEntry) {
 	}
 }
 
-// removeFromList 从 LRU 链表中移除条目
-// 调用者必须持有锁
+// removeFromList removes entry from LRU linked list
+// Caller must hold lock
 func (shard *CacheShard) removeFromList(entry *ShardedCacheEntry) {
 	if entry.prev != nil {
 		entry.prev.next = entry.next
@@ -269,8 +269,8 @@ func (shard *CacheShard) removeFromList(entry *ShardedCacheEntry) {
 	entry.next = nil
 }
 
-// evictLRU 淘汰最久未使用的条目
-// 调用者必须持有锁
+// evictLRU evicts least recently used entry
+// Caller must hold lock
 func (shard *CacheShard) evictLRU() {
 	if shard.tail == nil {
 		return
@@ -283,7 +283,7 @@ func (shard *CacheShard) evictLRU() {
 	atomic.AddUint64(&shard.evictions, 1)
 }
 
-// GetStats 获取缓存统计信息
+// GetStats gets cache statistics
 func (sc *ShardedCache) GetStats() ShardedCacheStats {
 	var stats ShardedCacheStats
 
@@ -302,7 +302,7 @@ func (sc *ShardedCache) GetStats() ShardedCacheStats {
 	return stats
 }
 
-// ShardedCacheStats 缓存统计信息
+// ShardedCacheStats cache statistics
 type ShardedCacheStats struct {
 	Hits      uint64
 	Misses    uint64
@@ -311,7 +311,7 @@ type ShardedCacheStats struct {
 	Size      int64
 }
 
-// Clear 清空所有缓存
+// Clear clears all cache
 func (sc *ShardedCache) Clear() {
 	for i := 0; i < 256; i++ {
 		shard := sc.shards[i]
@@ -324,9 +324,9 @@ func (sc *ShardedCache) Clear() {
 	}
 }
 
-// cleanupExpired 定期清理过期条目
+// cleanupExpired periodically cleans up expired entries
 func (sc *ShardedCache) cleanupExpired() {
-	ticker := time.NewTicker(5 * time.Minute) // 每5分钟清理一次
+	ticker := time.NewTicker(5 * time.Minute) // Clean every 5 minutes
 	defer ticker.Stop()
 
 	for {
@@ -342,7 +342,7 @@ func (sc *ShardedCache) cleanupExpired() {
 	}
 }
 
-// removeExpiredEntries 移除过期条目
+// removeExpiredEntries removes expired entries
 func (sc *ShardedCache) removeExpiredEntries() {
 	now := time.Now()
 	for i := 0; i < 256; i++ {
@@ -369,10 +369,10 @@ func (sc *ShardedCache) removeExpiredEntries() {
 	}
 }
 
-// Close 停止清理 goroutine 并释放资源
+// Close stops cleanup goroutine and releases resources
 func (sc *ShardedCache) Close() {
 	if sc.stopped.Load().(bool) {
-		return // 已经关闭
+		return // Already closed
 	}
 	sc.stopped.Store(true)
 	close(sc.stopChan)

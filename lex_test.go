@@ -196,7 +196,7 @@ func TestReadArrayTooLarge(t *testing.T) {
 }
 
 func TestReadDictStreamWithoutNewline(t *testing.T) {
-	// stream 后直接跟数据，无换行符，应该被容忍且不 panic
+	// Data follows stream directly without newline, should be tolerated and not panic
 	src := "<< /Length 3 >>stream ABC endstream"
 	buf := newBuffer(strings.NewReader(src), 0)
 	buf.allowEOF = true
@@ -221,7 +221,7 @@ func TestReadDictStreamWithoutNewline(t *testing.T) {
 }
 
 func TestReadKeywordInvalidNumberFallback(t *testing.T) {
-	// 超长整数解析失败时应回退为 keyword 而非 panic
+	// When parsing oversized integer fails, should fallback to keyword instead of panic
 	src := "999999999999999999999999999999"
 	buf := newBuffer(strings.NewReader(src), 0)
 	buf.allowEOF = true
@@ -232,7 +232,7 @@ func TestReadKeywordInvalidNumberFallback(t *testing.T) {
 }
 
 func TestReadDictWithNonNameKey(t *testing.T) {
-	// 非法 key 应被容忍并结束解析，而不是 panic
+	// Invalid key should be tolerated and end parsing, not panic
 	src := "<< /A 1 123 456 >>"
 	buf := newBuffer(strings.NewReader(src), 0)
 	buf.allowEOF = true

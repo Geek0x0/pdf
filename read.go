@@ -384,17 +384,25 @@ func (r *Reader) Trailer() Value {
 	return Value{r, r.trailerptr, r.trailer}
 }
 
-func readXref(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
+func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("malformed PDF: %v", rec)
+		}
+	}()
 	defer PutPDFBuffer(b)
 	tok := b.readToken()
 	if tok == keyword("xref") {
-		return readXrefTable(r, b)
+		xr, trailerptr, trailer, err = readXrefTable(r, b)
+		return
 	}
 	if _, ok := tok.(int64); ok {
 		b.unreadToken(tok)
-		return readXrefStream(r, b)
+		xr, trailerptr, trailer, err = readXrefStream(r, b)
+		return
 	}
-	return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
+	err = fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
+	return
 }
 
 func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
@@ -641,9 +649,7 @@ func (r *Reader) rebuildXrefTable() error {
 	}
 	r.xref = table
 	if err := r.recoverTrailer(data); err != nil {
-		r.trailer = make(dict)
-		r.trailerptr = objptr{}
-		return nil
+		return fmt.Errorf("failed to recover trailer: %w", err)
 	}
 	return nil
 }

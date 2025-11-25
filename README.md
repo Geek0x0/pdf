@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Test Coverage](https://img.shields.io/badge/coverage-66.9%25-yellow.svg)](https://github.com/Geek0x0/gopdf)
+[![Test Coverage](https://img.shields.io/badge/coverage-66.9%25-yellow.svg)](https://github.com/Geek0x0/pdf)
 
 GoPDF is a powerful PDF processing library written in Go, focused on efficient text extraction, content analysis, and multilingual support. Built with a modular architecture, it provides high-performance concurrent processing capabilities.
 
@@ -39,7 +39,7 @@ GoPDF is a powerful PDF processing library written in Go, focused on efficient t
 ## 📦 Installation
 
 ```bash
-go get -u github.com/Geek0x0/gopdf
+go get -u github.com/Geek0x0/pdf
 ```
 
 ## 🚀 Quick Start
@@ -52,7 +52,7 @@ package main
 import (
     "fmt"
     "log"
-    "github.com/Geek0x0/gopdf"
+    "github.com/Geek0x0/pdf"
 )
 
 func main() {
@@ -81,7 +81,7 @@ For high-performance PDF processing, follow these optimization steps:
 ### 1. Optimized Application Startup
 
 ```go
-import "github.com/Geek0x0/gopdf"
+import "github.com/Geek0x0/pdf"
 
 func init() {
     // Pre-warm memory pools and optimize GC settings
@@ -165,7 +165,7 @@ package main
 import (
     "fmt"
     "log"
-    "github.com/Geek0x0/gopdf"
+    "github.com/Geek0x0/pdf"
 )
 
 func main() {
@@ -504,7 +504,7 @@ Contributions are welcome! Please follow these steps:
 
 ```bash
 # Clone repository
-git clone https://github.com/Geek0x0/gopdf.git
+git clone https://github.com/Geek0x0/pdf.git
 cd gopdf
 
 # Install dependencies
@@ -529,8 +529,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Contact
 
-- Project Home: https://github.com/Geek0x0/gopdf
-- Issue Tracker: https://github.com/Geek0x0/gopdf/issues
+- Project Home: https://github.com/Geek0x0/pdf
+- Issue Tracker: https://github.com/Geek0x0/pdf/issues
 
 ---
 

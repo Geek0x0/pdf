@@ -464,6 +464,7 @@ type WorkStealingScheduler struct {
 	globalQueue chan Task
 	numWorkers  int
 	wg          sync.WaitGroup
+	taskWg      sync.WaitGroup
 	stop        chan struct{}
 }
 
@@ -516,11 +517,13 @@ func (wss *WorkStealingScheduler) Start() {
 // Submit 提交任务
 func (wss *WorkStealingScheduler) Submit(task Task) {
 	// 轮询分配到worker本地队列
+	wss.taskWg.Add(1)
 	select {
 	case wss.globalQueue <- task:
 	default:
 		// 全局队列满，直接执行
 		task.Execute()
+		wss.taskWg.Done()
 	}
 }
 
@@ -532,23 +535,8 @@ func (wss *WorkStealingScheduler) Stop() {
 
 // Wait 等待所有任务完成
 func (wss *WorkStealingScheduler) Wait() {
-	// 等待所有队列为空
-	for {
-		allEmpty := true
-		if len(wss.globalQueue) > 0 {
-			allEmpty = false
-		}
-		for _, worker := range wss.workers {
-			if len(worker.localQueue) > 0 {
-				allEmpty = false
-				break
-			}
-		}
-		if allEmpty {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 等待所有已提交的任务执行完成
+	wss.taskWg.Wait()
 }
 
 func (w *Worker) run() {
@@ -561,22 +549,31 @@ func (w *Worker) run() {
 
 		case task := <-w.localQueue:
 			// 优先处理本地队列
-			task.Execute()
+			w.execute(task)
 
 		case task := <-w.scheduler.globalQueue:
 			// 处理全局队列任务
-			task.Execute()
+			w.execute(task)
 
 		default:
 			// 尝试窃取其他worker的任务
 			if task := w.steal(); task != nil {
-				task.Execute()
+				w.execute(task)
 			} else {
 				// 无任务时短暂休眠
 				time.Sleep(100 * time.Microsecond)
 			}
 		}
 	}
+}
+
+func (w *Worker) execute(task Task) {
+	if task == nil {
+		return
+	}
+
+	task.Execute()
+	w.scheduler.taskWg.Done()
 }
 
 func (w *Worker) steal() Task {

@@ -23,6 +23,9 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 	if pages == 0 {
 		return emptyReader(), nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Set a reasonable object cache capacity to prevent unlimited growth
 	// For concurrent page processing, limit cache to prevent memory explosion
@@ -93,17 +96,22 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 
 	// Send jobs
 	for i := range pageList {
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			close(jobs)
-			return nil, ctx.Err()
-		case jobs <- i:
+			wg.Wait()
+			return nil, err
 		}
+		jobs <- i
 	}
 	close(jobs)
 
 	// Wait for completion
 	wg.Wait()
+
+	// Check for cancellation after processing
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Check for errors
 	select {

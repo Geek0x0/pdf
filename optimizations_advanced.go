@@ -174,14 +174,8 @@ func (c *CacheLineAlignedCounter) Get(idx int) uint64 {
 
 // 5. Work-Stealing Deque (Chase-Lev算法)
 type WSDeque struct {
-	buffer atomic.Value // *circularArray
-	top    atomic.Int64
-	bottom atomic.Int64
-}
-
-type circularArray struct {
+	mu   sync.Mutex
 	data []WSTask
-	size int64
 }
 
 type WSTask interface {
@@ -189,82 +183,44 @@ type WSTask interface {
 }
 
 func NewWSDeque(size int) *WSDeque {
-	d := &WSDeque{}
-	d.buffer.Store(&circularArray{
-		data: make([]WSTask, size),
-		size: int64(size),
-	})
-	d.top.Store(0)
-	d.bottom.Store(0)
-	return d
+	return &WSDeque{
+		data: make([]WSTask, 0, size),
+	}
 }
 
 // PushBottom - owner线程从底部插入
 func (d *WSDeque) PushBottom(task WSTask) {
-	b := d.bottom.Load()
-	t := d.top.Load()
-	arr := d.buffer.Load().(*circularArray)
-
-	size := b - t
-	if size >= arr.size {
-		// 需要扩容
-		newArr := &circularArray{
-			data: make([]WSTask, arr.size*2),
-			size: arr.size * 2,
-		}
-		for i := t; i < b; i++ {
-			newArr.data[i%newArr.size] = arr.data[i%arr.size]
-		}
-		d.buffer.Store(newArr)
-		arr = newArr
-	}
-
-	arr.data[b%arr.size] = task
-	d.bottom.Store(b + 1)
+	d.mu.Lock()
+	d.data = append(d.data, task)
+	d.mu.Unlock()
 }
 
 // PopBottom - owner线程从底部弹出（LIFO）
 func (d *WSDeque) PopBottom() WSTask {
-	b := d.bottom.Load() - 1
-	d.bottom.Store(b)
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	arr := d.buffer.Load().(*circularArray)
-	t := d.top.Load()
-
-	if b < t {
-		d.bottom.Store(t)
+	n := len(d.data)
+	if n == 0 {
 		return nil
 	}
 
-	task := arr.data[b%arr.size]
-	if b > t {
-		return task
-	}
-
-	// 最后一个元素，需要CAS竞争
-	if !d.top.CompareAndSwap(t, t+1) {
-		task = nil
-	}
-	d.bottom.Store(t + 1)
+	task := d.data[n-1]
+	d.data = d.data[:n-1]
 	return task
 }
 
 // Steal - 其他线程从顶部偷取（FIFO）
 func (d *WSDeque) Steal() WSTask {
-	t := d.top.Load()
-	b := d.bottom.Load()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	if t >= b {
+	if len(d.data) == 0 {
 		return nil
 	}
 
-	arr := d.buffer.Load().(*circularArray)
-	task := arr.data[t%arr.size]
-
-	if !d.top.CompareAndSwap(t, t+1) {
-		return nil
-	}
-
+	task := d.data[0]
+	d.data = d.data[1:]
 	return task
 }
 
@@ -273,6 +229,8 @@ type WorkStealingExecutor struct {
 	workers    []*WSWorker
 	numWorkers int
 	stopped    atomic.Bool
+	wg         sync.WaitGroup
+	roundRobin atomic.Uint64
 }
 
 type WSWorker struct {
@@ -304,21 +262,28 @@ func NewWorkStealingExecutor(numWorkers int) *WorkStealingExecutor {
 
 func (p *WorkStealingExecutor) Start() {
 	for _, w := range p.workers {
+		p.wg.Add(1)
 		go w.run()
 	}
 }
 
 func (p *WorkStealingExecutor) Stop() {
 	p.stopped.Store(true)
+	p.wg.Wait()
 }
 
 func (p *WorkStealingExecutor) Submit(task WSTask) {
+	if p.stopped.Load() {
+		return
+	}
 	// 随机选择一个worker提交任务
-	idx := runtime.GOMAXPROCS(0) % p.numWorkers
+	idx := int(p.roundRobin.Add(1)-1) % p.numWorkers
 	p.workers[idx].deque.PushBottom(task)
 }
 
 func (w *WSWorker) run() {
+	defer w.pool.wg.Done()
+
 	for !w.pool.stopped.Load() {
 		// 1. 从自己的deque底部取任务（LIFO，缓存友好）
 		if task := w.deque.PopBottom(); task != nil {

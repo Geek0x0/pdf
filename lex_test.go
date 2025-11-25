@@ -194,3 +194,61 @@ func TestReadArrayTooLarge(t *testing.T) {
 
 	buf.readArray()
 }
+
+func TestReadDictStreamWithoutNewline(t *testing.T) {
+	// stream 后直接跟数据，无换行符，应该被容忍且不 panic
+	src := "<< /Length 3 >>stream ABC endstream"
+	buf := newBuffer(strings.NewReader(src), 0)
+	buf.allowEOF = true
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	obj := buf.readObject()
+	strm, ok := obj.(stream)
+	if !ok {
+		t.Fatalf("expected stream, got %T", obj)
+	}
+	if strm.hdr["Length"] != int64(3) {
+		t.Fatalf("expected Length 3, got %v", strm.hdr["Length"])
+	}
+	if strm.offset <= 0 {
+		t.Fatalf("unexpected stream offset: %d", strm.offset)
+	}
+}
+
+func TestReadKeywordInvalidNumberFallback(t *testing.T) {
+	// 超长整数解析失败时应回退为 keyword 而非 panic
+	src := "999999999999999999999999999999"
+	buf := newBuffer(strings.NewReader(src), 0)
+	buf.allowEOF = true
+	tok := buf.readKeyword()
+	if _, ok := tok.(keyword); !ok {
+		t.Fatalf("expected keyword fallback, got %T", tok)
+	}
+}
+
+func TestReadDictWithNonNameKey(t *testing.T) {
+	// 非法 key 应被容忍并结束解析，而不是 panic
+	src := "<< /A 1 123 456 >>"
+	buf := newBuffer(strings.NewReader(src), 0)
+	buf.allowEOF = true
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	obj := buf.readObject()
+	d, ok := obj.(dict)
+	if !ok {
+		t.Fatalf("expected dict, got %T", obj)
+	}
+	if d[name("A")] != int64(1) {
+		t.Fatalf("expected key /A = 1, got %v", d[name("A")])
+	}
+}

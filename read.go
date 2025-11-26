@@ -130,19 +130,20 @@ var (
 
 // A Reader is a single PDF file open for reading.
 type Reader struct {
-	f          io.ReaderAt
-	closer     io.Closer // Optional closer for underlying resource
-	end        int64
-	xref       []xref
-	trailer    dict
-	trailerptr objptr
-	key        []byte
-	useAES     bool
-	cacheMu    sync.RWMutex
-	objCache   map[objptr]*list.Element
-	cacheList  *list.List
-	cacheCap   int
-	fontCache  *FontCache
+	f             io.ReaderAt
+	closer        io.Closer // Optional closer for underlying resource
+	end           int64
+	xref          []xref
+	trailer       dict
+	trailerptr    objptr
+	key           []byte
+	useAES        bool
+	cacheMu       sync.RWMutex
+	objCache      map[objptr]*list.Element
+	cacheList     *list.List
+	cacheCap      int
+	fontCache     *FontCache
+	compatibility *PDFCompatibilityInfo // Compatibility information
 }
 
 type xref struct {
@@ -323,23 +324,20 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 
-	// Parse version number
-	major := buf[sigIdx+5]
-	if major != '1' && major != '2' {
-		return nil, fmt.Errorf("not a PDF file: unsupported PDF version %c.x", major)
+	// Parse version number using enhanced compatibility checking
+	version, err := parsePDFVersion(buf[sigIdx:])
+	if err != nil {
+		return nil, err
 	}
-	if buf[sigIdx+6] != '.' {
-		return nil, fmt.Errorf("not a PDF file: invalid header format")
+
+	// Check version compatibility
+	if !version.IsSupported() {
+		return nil, fmt.Errorf("not a PDF file: unsupported PDF version %s", version.String())
 	}
-	minor := buf[sigIdx+7]
-	if major == '1' {
-		if minor < '0' || minor > '9' {
-			return nil, fmt.Errorf("not a PDF file: invalid PDF 1.x version")
-		}
-	} else if major == '2' {
-		if minor < '0' || minor > '9' {
-			return nil, fmt.Errorf("not a PDF file: invalid PDF 2.x version")
-		}
+
+	// Log version information
+	if DebugOn {
+		fmt.Printf("PDF version: %s\n", version.String())
 	}
 
 	// The byte after version should be whitespace, EOL, or start of binary marker.
@@ -413,6 +411,14 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		// A capacity of 2000 objects provides good performance while limiting memory.
 		cacheCap: 2000,
 	}
+
+	// Initialize compatibility information
+	if compatInfo, err := CheckPDFCompatibility(buf); err == nil {
+		r.compatibility = compatInfo
+		if DebugOn {
+			fmt.Printf("PDF Compatibility: %+v\n", compatInfo)
+		}
+	}
 	// Calculate position correctly for small files
 	// If the file is smaller than endChunk, we read from 0, so pos = i
 	// Otherwise, pos = end - bytesActuallyRead + i
@@ -483,8 +489,30 @@ func NewReaderEncryptedWithMmap(f io.ReaderAt, size int64, pw func() string) (*R
 		// For large files, we could implement memory mapping here
 		// For now, fall back to regular reader but log the opportunity
 		// TODO: Implement actual memory mapping using syscall.Mmap or similar
+		if DebugOn {
+			fmt.Printf("Large file detected (%d bytes), consider memory mapping optimization\n", size)
+		}
 	}
 	return NewReaderEncrypted(f, size, pw)
+}
+
+// NewReaderLinearized creates a reader optimized for linearized PDFs
+func NewReaderLinearized(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
+	r, err := NewReaderEncrypted(f, size, pw)
+	if err != nil {
+		return nil, err
+	}
+
+	// If PDF is linearized, enable optimizations
+	if r.compatibility != nil && r.compatibility.IsLinearized {
+		if DebugOn {
+			fmt.Println("PDF is linearized, enabling optimized reading")
+		}
+		// Linearized PDFs can be read more efficiently
+		// For now, we just mark it - future optimizations can be added here
+	}
+
+	return r, nil
 }
 
 // Trailer returns the file's Trailer value.
@@ -2288,4 +2316,9 @@ func (r *Reader) ExtractAllPagesParallel(ctx context.Context, workers int) ([]st
 	}
 
 	return results, nil
+}
+
+// GetCompatibilityInfo returns compatibility information for the PDF
+func (r *Reader) GetCompatibilityInfo() *PDFCompatibilityInfo {
+	return r.compatibility
 }

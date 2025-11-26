@@ -498,17 +498,50 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref)
 	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
-		// Try to find xref by searching the file
+		// Recovery strategy chain:
+		// 1. Try searchAndParseXref (search for xref/XRef in file)
+		// 2. Try rebuildXrefTable (scan for all objects)
+		// 3. Try RecoverPDF (comprehensive recovery with multiple strategies)
+
+		recovered := false
+
+		// Strategy 1: Search for xref table/stream
 		if searchErr := r.searchAndParseXref(); searchErr == nil {
 			trailer = r.trailer
 			trailerptr = r.trailerptr
-		} else if rebuildErr := r.rebuildXrefTable(); rebuildErr != nil {
-			// Return more detailed error combining both failures
-			return nil, fmt.Errorf("malformed PDF: xref table at offset %d: %v, rebuild also failed: %v", startxref, err, rebuildErr)
-		} else {
-			// Rebuild successful, trailer should be set by recoverTrailer
-			trailer = r.trailer
+			recovered = true
+			if DebugOn {
+				fmt.Println("Recovery successful: searchAndParseXref")
+			}
 		}
+
+		// Strategy 2: Rebuild xref by scanning objects
+		if !recovered {
+			if rebuildErr := r.rebuildXrefTable(); rebuildErr == nil {
+				trailer = r.trailer
+				recovered = true
+				if DebugOn {
+					fmt.Println("Recovery successful: rebuildXrefTable")
+				}
+			}
+		}
+
+		// Strategy 3: Use comprehensive recovery
+		if !recovered {
+			opts := DefaultRecoveryOptions()
+			if recoverErr := recoverPDFInternal(r, opts); recoverErr == nil {
+				trailer = r.trailer
+				recovered = true
+				if DebugOn {
+					fmt.Println("Recovery successful: RecoverPDF")
+				}
+			}
+		}
+
+		if !recovered {
+			return nil, fmt.Errorf("malformed PDF: xref table at offset %d: %v (all recovery strategies failed)", startxref, err)
+		}
+
 		_ = trailerptr // Not used for rebuilt xref
 	} else {
 		r.xref = xref

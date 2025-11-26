@@ -61,7 +61,10 @@ func (os *OptimizedSorter) timSort(texts []Text, less func(i, j int) bool) {
 	// Create initial runs
 	for i := 0; i < n; {
 		start := i
-		end := min(i+minRunLen, n)
+		end := i + minRunLen
+		if end > n {
+			end = n
+		}
 
 		// Find natural run
 		for j := start + 1; j < end && !less(j, j-1); j++ {

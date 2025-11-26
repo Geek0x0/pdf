@@ -667,7 +667,11 @@ func readCmap(toUnicode Value) *cmap {
 			n = int(stk.Pop().Int64())
 		case "endbfchar":
 			if n < 0 {
-				panic("missing beginbfchar")
+				if DebugOn {
+					println("missing beginbfchar")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				repl, orig := stk.Pop().RawString(), stk.Pop().RawString()
@@ -677,7 +681,11 @@ func readCmap(toUnicode Value) *cmap {
 			n = int(stk.Pop().Int64())
 		case "endbfrange":
 			if n < 0 {
-				panic("missing beginbfrange")
+				if DebugOn {
+					println("missing beginbfrange")
+				}
+				ok = false
+				return
 			}
 			for i := 0; i < n; i++ {
 				dst, srcHi, srcLo := stk.Pop(), stk.Pop().RawString(), stk.Pop().RawString()

@@ -45,6 +45,10 @@ func isUTF16(s string) bool {
 }
 
 func utf16Decode(s string) string {
+	// Handle odd-length strings by ignoring the last byte
+	if len(s)%2 != 0 {
+		s = s[:len(s)-1]
+	}
 	var u []uint16
 	for i := 0; i < len(s); i += 2 {
 		u = append(u, uint16(s[i])<<8|uint16(s[i+1]))

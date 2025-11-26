@@ -98,26 +98,33 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 					continue
 				case "currentdict":
 					if len(dicts) == 0 {
-						panic("no current dictionary")
+						// Tolerate missing dictionary, push empty dict
+						stk.Push(Value{nil, objptr{}, make(dict)})
+						continue
 					}
 					stk.Push(Value{nil, objptr{}, dicts[len(dicts)-1]})
 					continue
 				case "begin":
 					d := stk.Pop()
 					if d.Kind() != Dict {
-						panic("cannot begin non-dict")
+						// Tolerate non-dict, skip begin
+						continue
 					}
 					dicts = append(dicts, d.data.(dict))
 					continue
 				case "end":
 					if len(dicts) <= 0 {
-						panic("mismatched begin/end")
+						// Tolerate mismatched end, skip
+						continue
 					}
 					dicts = dicts[:len(dicts)-1]
 					continue
 				case "def":
 					if len(dicts) <= 0 {
-						panic("def without open dict")
+						// Tolerate def without dict, skip
+						stk.Pop() // val
+						stk.Pop() // key
+						continue
 					}
 					val := stk.Pop()
 					key, ok := stk.Pop().data.(name)

@@ -89,3 +89,48 @@ func TestUTF16Decode(t *testing.T) {
 		}
 	}
 }
+
+func TestUTF16DecodeOddLength(t *testing.T) {
+	// Test that odd-length strings don't cause panic
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "single byte",
+			input:    "\x00",
+			expected: "",
+		},
+		{
+			name:     "three bytes",
+			input:    "\x00\x41\x00",
+			expected: "A",
+		},
+		{
+			name:     "five bytes",
+			input:    "\x00\x41\x00\x42\x00",
+			expected: "AB",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+
+			result := utf16Decode(tc.input)
+			if result != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}

@@ -308,3 +308,72 @@ func TestReadHexStringOddLength(t *testing.T) {
 		})
 	}
 }
+
+func TestReadNameWithHashEscape(t *testing.T) {
+	// Test various edge cases for # escaping in PDF names
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal hex escape",
+			input:    "/Test#20Name ",
+			expected: "Test Name",
+		},
+		{
+			name:     "hash at end of name",
+			input:    "/Test# ",
+			expected: "Test#",
+		},
+		{
+			name:     "hash followed by one hex digit then space",
+			input:    "/Test#2 ",
+			expected: "Test ",
+		},
+		{
+			name:     "hash followed by invalid hex",
+			input:    "/Test#GG ",
+			expected: "Test#GG",
+		},
+		{
+			name:     "hash followed by one invalid char",
+			input:    "/Test#G ",
+			expected: "Test#G",
+		},
+		{
+			name:     "multiple valid escapes",
+			input:    "/Test#20#2FName ",
+			expected: "Test /Name",
+		},
+		{
+			name:     "hash followed by delimiter",
+			input:    "/Test#/ ",
+			expected: "Test#",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := newBuffer(strings.NewReader(tc.input), 0)
+			buf.allowEOF = true
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+
+			// Skip the initial '/'
+			buf.readByte()
+			result := buf.readName()
+			if n, ok := result.(name); ok {
+				if string(n) != tc.expected {
+					t.Errorf("expected %q, got %q", tc.expected, string(n))
+				}
+			} else {
+				t.Errorf("expected name token, got %T", result)
+			}
+		})
+	}
+}

@@ -300,9 +300,33 @@ func (b *buffer) readName() token {
 			break
 		}
 		if c == '#' {
-			x := unhex(b.readByte())<<4 | unhex(b.readByte())
+			c1 := b.readByte()
+			if isDelim(c1) || isSpace(c1) {
+				// Malformed: # at end of name or followed by delimiter
+				// Treat # as literal character and unread the delimiter
+				b.unreadByte()
+				tmp = append(tmp, '#')
+				continue
+			}
+			c2 := b.readByte()
+			if isDelim(c2) || isSpace(c2) {
+				// Malformed: only one hex digit after #
+				// Treat as single hex digit followed by 0 (similar to hex string handling)
+				b.unreadByte()
+				x := unhex(c1)
+				if x < 0 {
+					// Not a valid hex digit, treat # and c1 as literals
+					tmp = append(tmp, '#', c1)
+					continue
+				}
+				tmp = append(tmp, byte(x<<4))
+				continue
+			}
+			x := unhex(c1)<<4 | unhex(c2)
 			if x < 0 {
-				b.errorf("malformed name")
+				// Invalid hex digits, treat all as literal characters
+				tmp = append(tmp, '#', c1, c2)
+				continue
 			}
 			tmp = append(tmp, byte(x))
 			continue

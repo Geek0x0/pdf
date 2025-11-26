@@ -333,8 +333,12 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
 		if rebuildErr := r.rebuildXrefTable(); rebuildErr != nil {
-			return nil, err
+			// Return more detailed error combining both failures
+			return nil, fmt.Errorf("malformed PDF: xref table at offset %d: %v, rebuild also failed: %v", startxref, err, rebuildErr)
 		}
+		// Rebuild successful, trailer should be set by recoverTrailer
+		trailer = r.trailer
+		_ = trailerptr // Not used for rebuilt xref
 	} else {
 		r.xref = xref
 		r.trailer = trailer
@@ -397,7 +401,16 @@ func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict,
 		xr, trailerptr, trailer, err = readXrefStream(r, b)
 		return
 	}
-	err = fmt.Errorf("malformed PDF: cross-reference table not found: %v", tok)
+	// Enhanced error reporting with buffer position and more context
+	offset := b.readOffset()
+	// Limit the token representation to avoid very long error messages
+	tokStr := fmt.Sprintf("%T", tok)
+	if len(fmt.Sprintf("%v", tok)) > 100 {
+		tokStr += " (value too long to display)"
+	} else {
+		tokStr += fmt.Sprintf(": %v", tok)
+	}
+	err = fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found %s", offset, tokStr)
 	return
 }
 
@@ -405,12 +418,26 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	obj1 := b.readObject()
 	obj, ok := obj1.(objdef)
 	if !ok {
-		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %v", objfmt(obj1))
+		// Limit error message length for large objects
+		objStr := fmt.Sprintf("%T", obj1)
+		if len(fmt.Sprintf("%v", obj1)) > 100 {
+			objStr += " (value too long to display)"
+		} else {
+			objStr += fmt.Sprintf(": %v", obj1)
+		}
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %s", objStr)
 	}
 	strmptr := obj.ptr
 	strm, ok := obj.obj.(stream)
 	if !ok {
-		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %v", objfmt(obj))
+		// Limit error message length for large objects
+		objStr := fmt.Sprintf("%T", obj.obj)
+		if len(fmt.Sprintf("%v", obj.obj)) > 100 {
+			objStr += " (value too long to display)"
+		} else {
+			objStr += fmt.Sprintf(": %v", obj.obj)
+		}
+		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %s", objStr)
 	}
 	if strm.hdr["Type"] != name("XRef") {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref stream does not have type XRef")

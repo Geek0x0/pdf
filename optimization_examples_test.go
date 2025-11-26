@@ -142,8 +142,8 @@ func TestKDTreeRangeSearch(t *testing.T) {
 
 	tree := BuildKDTree(blocks)
 
-	// Search near (7.5, 7.5), radius 100
-	results := tree.RangeSearch([]float64{7.5, 7.5}, 100)
+	// Search near (7.5, 7.5), radius 100 (pass squared radius: 100*100=10000)
+	results := tree.RangeSearch(7.5, 7.5, 10000)
 
 	t.Logf("找到 %d 个近邻块", len(results))
 	if len(results) < 2 {
@@ -188,7 +188,7 @@ func BenchmarkKDTreeRangeSearch(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tree.RangeSearch([]float64{500, 250}, 10000)
+		tree.RangeSearch(500, 250, 10000) // Pass squared radius
 	}
 }
 

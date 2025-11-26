@@ -537,8 +537,11 @@ func TestGetPDFBuffer(t *testing.T) {
 }
 
 func TestPutPDFBuffer(t *testing.T) {
-	buf := &buffer{}
-	PutPDFBuffer(buf) // Just test that it doesn't panic
+	buf := GetPDFBuffer()
+	if buf == nil {
+		t.Fatal("expected non-nil buffer")
+	}
+	PutPDFBuffer(buf) // ensure returning pooled buffers remains safe
 }
 
 func TestNewFastStringBuilder(t *testing.T) {

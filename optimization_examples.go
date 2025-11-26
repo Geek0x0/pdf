@@ -19,6 +19,17 @@ var resultPool = sync.Pool{
 	},
 }
 
+// searchStackPool provides reusable stacks for KDTree range search
+// to avoid allocation on each search operation
+var searchStackPool = sync.Pool{
+	New: func() interface{} {
+		return make([]searchStackItem, 0, 128)
+	},
+}
+
+// searchStackItem is used by RangeSearch iterative algorithm
+type searchStackItem struct{ node *KDNode }
+
 // Get reused result slice
 func getResultSlice() []*TextBlock {
 	return resultPool.Get().([]*TextBlock)
@@ -146,12 +157,14 @@ func (bsb *BatchStringBuilder) Reset() {
 // ==================== Second Stage Optimization Example ====================
 
 // KDNode KD tree node
+// Optimized: Use fixed float64 instead of slice to avoid allocation
 type KDNode struct {
-	point []float64  // Coordinate point [x, y]
-	data  *TextBlock // Associated text block
-	left  *KDNode
-	right *KDNode
-	axis  int // Split axis (0=x, 1=y)
+	pointX float64    // X coordinate (optimization: avoid slice allocation)
+	pointY float64    // Y coordinate
+	data   *TextBlock // Associated text block
+	left   *KDNode
+	right  *KDNode
+	axis   int // Split axis (0=x, 1=y)
 }
 
 // KDTree KD tree spatial index
@@ -161,70 +174,96 @@ type KDTree struct {
 	dimension int
 }
 
+// kdPointOptimized uses fixed coordinates to avoid slice overhead
+type kdPointOptimized struct {
+	x, y float64
+	data *TextBlock
+}
+
+// indexSorter implements sort.Interface for sorting indices by coordinate
+// This avoids closure allocation in sort.Slice
+type indexSorter struct {
+	indices []int
+	points  []kdPointOptimized
+	axis    int
+}
+
+func (s *indexSorter) Len() int { return len(s.indices) }
+func (s *indexSorter) Swap(i, j int) {
+	s.indices[i], s.indices[j] = s.indices[j], s.indices[i]
+}
+func (s *indexSorter) Less(i, j int) bool {
+	pi, pj := s.points[s.indices[i]], s.points[s.indices[j]]
+	if s.axis == 0 {
+		return pi.x < pj.x
+	}
+	return pi.y < pj.y
+}
+
 // BuildKDTree builds KD tree from text blocks
+// Optimized: pre-allocate indices once, use fixed-size coordinates
 func BuildKDTree(blocks []*TextBlock) *KDTree {
 	if len(blocks) == 0 {
 		return &KDTree{dimension: 2}
 	}
 
-	// Convert TextBlock to points
-	points := make([]kdPoint, len(blocks))
+	// Convert TextBlock to optimized points
+	points := make([]kdPointOptimized, len(blocks))
+	indices := make([]int, len(blocks)) // Allocate once
 	for i, block := range blocks {
 		center := block.Center()
-		points[i] = kdPoint{
-			coords: []float64{center.X, center.Y},
-			data:   block,
+		points[i] = kdPointOptimized{
+			x:    center.X,
+			y:    center.Y,
+			data: block,
 		}
+		indices[i] = i
 	}
 
 	tree := &KDTree{dimension: 2}
-	tree.root = buildKDTreeRecursive(points, 0)
+	tree.root = buildKDTreeOptimized(points, indices, 0)
 	return tree
 }
 
-type kdPoint struct {
-	coords []float64
-	data   *TextBlock
-}
-
-// buildKDTreeRecursiveIndexed optimized version using indices to avoid slice copying
-func buildKDTreeRecursiveIndexed(points []kdPoint, indices []int, depth int) *KDNode {
+// buildKDTreeOptimized builds KD tree with optimized data structures
+func buildKDTreeOptimized(points []kdPointOptimized, indices []int, depth int) *KDNode {
 	if len(indices) == 0 {
 		return nil
 	}
 
 	axis := depth % 2 // Alternate between x and y axes in 2D space
 
-	// Sort indices by current axis
-	sort.Slice(indices, func(i, j int) bool {
-		return points[indices[i]].coords[axis] < points[indices[j]].coords[axis]
-	})
+	// Sort using custom sorter to avoid closure allocation
+	sorter := &indexSorter{indices: indices, points: points, axis: axis}
+	if len(indices) <= 16 {
+		// Insertion sort for small arrays
+		for i := 1; i < len(indices); i++ {
+			for j := i; j > 0 && sorter.Less(j, j-1); j-- {
+				sorter.Swap(j, j-1)
+			}
+		}
+	} else {
+		sort.Sort(sorter)
+	}
 
 	// Select median as split point
 	medianPos := len(indices) / 2
 	medianIdx := indices[medianPos]
+	p := points[medianIdx]
 
 	return &KDNode{
-		point: points[medianIdx].coords,
-		data:  points[medianIdx].data,
-		axis:  axis,
-		left:  buildKDTreeRecursiveIndexed(points, indices[:medianPos], depth+1),
-		right: buildKDTreeRecursiveIndexed(points, indices[medianPos+1:], depth+1),
+		pointX: p.x,
+		pointY: p.y,
+		data:   p.data,
+		axis:   axis,
+		left:   buildKDTreeOptimized(points, indices[:medianPos], depth+1),
+		right:  buildKDTreeOptimized(points, indices[medianPos+1:], depth+1),
 	}
-}
-
-func buildKDTreeRecursive(points []kdPoint, depth int) *KDNode {
-	// Create index array, allocate only once
-	indices := make([]int, len(points))
-	for i := range indices {
-		indices[i] = i
-	}
-	return buildKDTreeRecursiveIndexed(points, indices, depth)
 }
 
 // RangeSearch range search, returns all text blocks within specified radius of target point
-// Use iterative approach instead of recursion to avoid large memory allocation from deep recursion
-func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
+// Optimized: uses object pool for stack, inlined distance calculation, direct coordinates
+func (tree *KDTree) RangeSearch(targetX, targetY, radiusSq float64) []*TextBlock {
 	if tree.root == nil {
 		return nil
 	}
@@ -232,16 +271,10 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 	// Get result slice from object pool
 	result := getResultSlice()
 
-	// Use stack for iterative search, avoid recursion call stack overhead
-	type stackItem struct {
-		node *KDNode
-	}
-
-	// Use fixed-size stack, avoid dynamic expansion
-	stack := make([]stackItem, 0, 64)
-	stack = append(stack, stackItem{node: tree.root})
-
-	radiusSq := radius * radius
+	// Get stack from pool for reuse
+	stack := searchStackPool.Get().([]searchStackItem)
+	stack = stack[:0]
+	stack = append(stack, searchStackItem{node: tree.root})
 
 	for len(stack) > 0 {
 		// Pop top element from stack
@@ -253,36 +286,49 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 			continue
 		}
 
-		// Calculate squared distance from current point to target point
-		dist := euclideanDistance(current.point, target)
-		if dist <= radiusSq {
+		// Inline distance calculation to avoid function call overhead
+		dx := current.pointX - targetX
+		dy := current.pointY - targetY
+		distSq := dx*dx + dy*dy
+
+		if distSq <= radiusSq {
 			result = append(result, current.data)
 		}
 
 		// Calculate distance to split hyperplane
-		planeDist := target[current.axis] - current.point[current.axis]
-		planeDist2 := planeDist * planeDist
+		var planeDist float64
+		if current.axis == 0 {
+			planeDist = targetX - current.pointX
+		} else {
+			planeDist = targetY - current.pointY
+		}
+		planeDistSq := planeDist * planeDist
 
 		// Decide search order
 		if planeDist < 0 {
 			// Search left side first (near side)
 			if current.left != nil {
-				stack = append(stack, stackItem{node: current.left})
+				stack = append(stack, searchStackItem{node: current.left})
 			}
 			// If hyperplane is in range, also search right side (far side)
-			if planeDist2 <= radiusSq && current.right != nil {
-				stack = append(stack, stackItem{node: current.right})
+			if planeDistSq <= radiusSq && current.right != nil {
+				stack = append(stack, searchStackItem{node: current.right})
 			}
 		} else {
 			// Search right side first (near side)
 			if current.right != nil {
-				stack = append(stack, stackItem{node: current.right})
+				stack = append(stack, searchStackItem{node: current.right})
 			}
 			// If hyperplane is in range, also search left side (far side)
-			if planeDist2 <= radiusSq && current.left != nil {
-				stack = append(stack, stackItem{node: current.left})
+			if planeDistSq <= radiusSq && current.left != nil {
+				stack = append(stack, searchStackItem{node: current.left})
 			}
 		}
+	}
+
+	// Return stack to pool (only if not too large)
+	if cap(stack) <= 256 {
+		searchStackPool.Put(stack)
 	}
 
 	return result
@@ -293,12 +339,6 @@ func (tree *KDTree) RangeSearch(target []float64, radius float64) []*TextBlock {
 func (tree *KDTree) rangeSearchRecursive(node *KDNode, target []float64, radius float64, result *[]*TextBlock) {
 	// This function is deprecated, kept only for compatibility
 	// Actually use iterative version of RangeSearch
-}
-
-func euclideanDistance(p1, p2 []float64) float64 {
-	dx := p1[0] - p2[0]
-	dy := p1[1] - p2[1]
-	return dx*dx + dy*dy // Return squared distance, avoid sqrt
 }
 
 // ClusterTextBlocksOptimized uses KD tree optimized text block clustering
@@ -369,11 +409,11 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		blockToIdx[block] = i
 	}
 
-	// Find neighbors for each block and merge
+	// Find neighbors for each block and merge (optimized: pass coordinates directly)
 	for i, block := range blocks {
 		center := block.Center()
-		// Use optimized iterative search
-		neighbors := kdtree.RangeSearch([]float64{center.X, center.Y}, distThresholdSq)
+		// Use optimized search with direct coordinates
+		neighbors := kdtree.RangeSearch(center.X, center.Y, distThresholdSq)
 
 		for _, neighbor := range neighbors {
 			if j, ok := blockToIdx[neighbor]; ok && i != j {

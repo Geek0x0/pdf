@@ -7,7 +7,6 @@ package pdf
 import (
 	"math"
 	"sort"
-	"strings"
 )
 
 // TextBlock represents a coherent block of text (like a paragraph or column)
@@ -78,8 +77,8 @@ func clusterTextBlocks(texts []Text) []*TextBlock {
 		return nil
 	}
 
-	// For small datasets, use simple method (threshold after tuning: 200)
-	if len(texts) < 200 {
+	// For small datasets, use simple method (threshold raised to 500 for better performance)
+	if len(texts) < 500 {
 		return clusterTextBlocksSimple(texts)
 	}
 
@@ -139,48 +138,110 @@ func clusterTextBlocksSimple(texts []Text) []*TextBlock {
 }
 
 // shouldMergeClusters determines if two text blocks should be merged
+// Optimized: inline min/max, cache width calculations, early returns
 func shouldMergeClusters(b1, b2 *TextBlock, threshold float64) bool {
-	// Enhanced logic for asymmetric layouts and text-image mixing
-
-	// Check vertical proximity (same line or nearby lines)
-	verticalOverlap := math.Min(b1.MaxY, b2.MaxY) - math.Max(b1.MinY, b2.MinY)
-	if verticalOverlap < 0 {
-		verticalOverlap = 0
+	// Inline min/max for performance (avoid function call overhead)
+	var minMaxY, maxMinY float64
+	if b1.MaxY < b2.MaxY {
+		minMaxY = b1.MaxY
+	} else {
+		minMaxY = b2.MaxY
 	}
+	if b1.MinY > b2.MinY {
+		maxMinY = b1.MinY
+	} else {
+		maxMinY = b2.MinY
+	}
+	verticalOverlap := minMaxY - maxMinY
 
-	// If there's significant vertical overlap, check horizontal distance
-	if verticalOverlap > b1.AvgFontSize*0.3 || verticalOverlap > b2.AvgFontSize*0.3 {
-		horizontalGap := math.Max(b1.MinX, b2.MinX) - math.Min(b1.MaxX, b2.MaxX)
-		if horizontalGap < 0 {
-			horizontalGap = 0
+	// Early return for vertically overlapping blocks
+	if verticalOverlap > 0 && (verticalOverlap > b1.AvgFontSize*0.3 || verticalOverlap > b2.AvgFontSize*0.3) {
+		var maxMinX, minMaxX float64
+		if b1.MinX > b2.MinX {
+			maxMinX = b1.MinX
+		} else {
+			maxMinX = b2.MinX
 		}
+		if b1.MaxX < b2.MaxX {
+			minMaxX = b1.MaxX
+		} else {
+			minMaxX = b2.MaxX
+		}
+		horizontalGap := maxMinX - minMaxX
 		if horizontalGap < threshold {
 			return true
 		}
 	}
 
-	// Check if vertically stacked and horizontally aligned (same column)
-	horizontalOverlap := math.Min(b1.MaxX, b2.MaxX) - math.Max(b1.MinX, b2.MinX)
+	// Cache width calculations
+	w1 := b1.MaxX - b1.MinX
+	w2 := b2.MaxX - b2.MinX
+
+	// Check if vertically stacked and horizontally aligned
+	var minMaxX, maxMinX float64
+	if b1.MaxX < b2.MaxX {
+		minMaxX = b1.MaxX
+	} else {
+		minMaxX = b2.MaxX
+	}
+	if b1.MinX > b2.MinX {
+		maxMinX = b1.MinX
+	} else {
+		maxMinX = b2.MinX
+	}
+	horizontalOverlap := minMaxX - maxMinX
+
 	if horizontalOverlap > 0 {
-		overlapRatio := horizontalOverlap / math.Min(b1.Width(), b2.Width())
+		minWidth := w1
+		if w2 < minWidth {
+			minWidth = w2
+		}
+		if minWidth <= 0 {
+			return false
+		}
+		overlapRatio := horizontalOverlap / minWidth
 		if overlapRatio > 0.6 {
-			verticalGap := math.Max(b1.MinY, b2.MinY) - math.Min(b1.MaxY, b2.MaxY)
-			if verticalGap < 0 {
-				verticalGap = 0
+			var maxMinY2, minMaxY2 float64
+			if b1.MinY > b2.MinY {
+				maxMinY2 = b1.MinY
+			} else {
+				maxMinY2 = b2.MinY
 			}
-			if verticalGap < threshold*1.5 {
+			if b1.MaxY < b2.MaxY {
+				minMaxY2 = b1.MaxY
+			} else {
+				minMaxY2 = b2.MaxY
+			}
+			verticalGap := maxMinY2 - minMaxY2
+			if verticalGap >= 0 && verticalGap < threshold*1.5 {
 				return true
 			}
 		}
 	}
 
-	// For asymmetric layouts: check if blocks are in different regions
-	if isAsymmetricLayout(b1, b2) {
-		return false // Don't merge across asymmetric boundaries
+	// Inline asymmetric layout check (avoid function call)
+	c1x := (b1.MinX + b1.MaxX) * 0.5
+	c1y := (b1.MinY + b1.MaxY) * 0.5
+	c2x := (b2.MinX + b2.MaxX) * 0.5
+	c2y := (b2.MinY + b2.MaxY) * 0.5
+
+	horizontalDistance := c1x - c2x
+	if horizontalDistance < 0 {
+		horizontalDistance = -horizontalDistance
+	}
+	verticalDistance := c1y - c2y
+	if verticalDistance < 0 {
+		verticalDistance = -verticalDistance
 	}
 
-	// For text-image mixing: avoid merging text that wraps around images
-	if isTextImageMix(b1, b2) {
+	// Different columns check
+	if horizontalDistance > verticalDistance*2 {
+		return false
+	}
+
+	// Text-image mix check (inline)
+	avgSize := (w1 + (b1.MaxY - b1.MinY) + w2 + (b2.MaxY - b2.MinY)) * 0.25
+	if horizontalDistance > avgSize*2 || verticalDistance > avgSize*2 {
 		return false
 	}
 
@@ -549,56 +610,56 @@ func SmartTextRunsToPlain(texts []Text) string {
 	// Use smart ordering algorithm
 	ordered := smartTextOrdering(texts)
 
-	// Group into lines for formatting
+	// Optimized: Build output directly without intermediate line grouping
+	return buildPlainTextOptimized(ordered)
+}
+
+// buildPlainTextOptimized builds plain text directly from ordered texts
+// avoiding intermediate slice allocations for line grouping
+func buildPlainTextOptimized(texts []Text) string {
+	if len(texts) == 0 {
+		return ""
+	}
+
+	// Pre-calculate total length for single allocation
+	totalLen := 0
+	for i := range texts {
+		totalLen += len(texts[i].S) + 2 // text + potential space/newline
+	}
+
+	// Build directly into byte slice (faster than strings.Builder for known size)
+	result := make([]byte, 0, totalLen)
 	const lineTolerance = 3.0
-	// Pre-allocate lines capacity, estimate number of lines as 1/10 of text count
-	lines := make([][]Text, 0, len(ordered)/10+1)
-	// Pre-allocate currentLine capacity
-	currentLine := make([]Text, 0, 10)
-	var currentY float64
+	var prevY float64
+	var prevX float64
+	var prevW float64
 
-	for i, t := range ordered {
-		if i == 0 {
-			currentLine = append(currentLine, t)
-			currentY = t.Y
-			continue
-		}
-
-		if math.Abs(t.Y-currentY) <= lineTolerance {
-			currentLine = append(currentLine, t)
-		} else {
-			if len(currentLine) > 0 {
-				lines = append(lines, currentLine)
+	for i := range texts {
+		t := &texts[i]
+		if i > 0 {
+			// Inline abs calculation
+			dy := t.Y - prevY
+			if dy < 0 {
+				dy = -dy
 			}
-			currentLine = make([]Text, 0, 10)
-			currentLine = append(currentLine, t)
-			currentY = t.Y
+			if dy > lineTolerance {
+				// New line
+				result = append(result, '\n')
+			} else {
+				// Same line - check if space needed
+				gap := t.X - (prevX + prevW)
+				if gap > t.FontSize*0.3 {
+					result = append(result, ' ')
+				}
+			}
 		}
-	}
-	if len(currentLine) > 0 {
-		lines = append(lines, currentLine)
+		result = append(result, t.S...)
+		prevY = t.Y
+		prevX = t.X
+		prevW = t.W
 	}
 
-	// Build output with proper spacing
-	// Improved capacity estimation: count actual text length instead of fixed estimation
-	estimatedLen := 0
-	for _, line := range lines {
-		for _, t := range line {
-			estimatedLen += len(t.S) + 1 // text length + space
-		}
-		estimatedLen += 1 // newline
-	}
-	var builder strings.Builder
-	builder.Grow(estimatedLen)
-
-	for i, line := range lines {
-		appendLine(&builder, line)
-		if i < len(lines)-1 {
-			builder.WriteByte('\n')
-		}
-	}
-
-	return strings.TrimRight(builder.String(), "\n")
+	return string(result)
 }
 
 // isAsymmetricLayout checks if two blocks are in different asymmetric layout regions

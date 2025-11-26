@@ -79,14 +79,15 @@ func BenchmarkKDTreeRangeSearchMemOpt(b *testing.B) {
 	}
 
 	tree := BuildKDTree(blocks)
-	target := []float64{50, 50}
-	radius := 20.0
+	targetX := 50.0
+	targetY := 50.0
+	radiusSq := 20.0 * 20.0 // Pass squared radius
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		_ = tree.RangeSearch(target, radius)
+		_ = tree.RangeSearch(targetX, targetY, radiusSq)
 	}
 }
 

@@ -98,11 +98,11 @@ func TestParseTimer(t *testing.T) {
 func TestParseLimits(t *testing.T) {
 	limits := DefaultParseLimits()
 
-	if limits.MaxParseTime != 30*time.Second {
-		t.Errorf("expected 30s max parse time, got %v", limits.MaxParseTime)
+	if limits.MaxParseTime != 45*time.Second {
+		t.Errorf("expected 45s max parse time, got %v", limits.MaxParseTime)
 	}
-	if limits.MaxHexStringBytes != 10*1024*1024 {
-		t.Errorf("expected 10MB max hex string, got %d", limits.MaxHexStringBytes)
+	if limits.MaxHexStringBytes != 100*1024*1024 {
+		t.Errorf("expected 100MB max hex string, got %d", limits.MaxHexStringBytes)
 	}
 	if limits.CheckInterval != 1000 {
 		t.Errorf("expected 1000 check interval, got %d", limits.CheckInterval)
@@ -191,7 +191,7 @@ func TestReadHexStringCancellation(t *testing.T) {
 	largeHex := "<" + strings.Repeat("48", 100000) + ">"
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cc := newContextChecker(ctx, 10) // Check every 10 iterations
+	cc := newContextChecker(ctx, 1) // Check every iteration for immediate detection
 
 	// Cancel immediately
 	cancel()
@@ -202,12 +202,15 @@ func TestReadHexStringCancellation(t *testing.T) {
 
 	tok := b.readHexString()
 
-	// Should return nil or short result due to cancellation
-	// The exact behavior depends on when the cancellation is detected
+	// Should return nil on cancellation
+	// With batch reading optimization, the first buffer load may complete
+	// before cancellation is detected, so we check if result is significantly smaller
 	if tok != nil {
 		result := tok.(string)
-		if len(result) == 100000 {
-			t.Error("cancellation should have stopped hex string reading early")
+		// Allow some tolerance - the first batch may complete before cancellation detected
+		// But it should be significantly smaller than the full 100000 bytes
+		if len(result) > 70000 {
+			t.Errorf("cancellation should have stopped hex string reading early, got %d bytes", len(result))
 		}
 	}
 }

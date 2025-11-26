@@ -186,100 +186,164 @@ func (b *buffer) readToken() token {
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 
-	// Pre-allocate lookup table for hex decoding (faster than switch)
-	// Values: 0-15 for valid hex, -1 for invalid, -2 for space, -3 for '>'
-
-	iterCount := 0
 	maxBytes := 0
 	if b.limits != nil && b.limits.MaxHexStringBytes > 0 {
 		maxBytes = b.limits.MaxHexStringBytes
 	}
 
-	for {
-		// Check context cancellation periodically (every 512 bytes to minimize overhead)
-		iterCount++
-		if iterCount&511 == 0 {
-			if b.ctxChecker != nil && b.ctxChecker.Check() {
-				b.tmp = tmp
-				return nil // Return nil on cancellation
-			}
-		}
+	// Cancellation check interval - check every N bytes decoded
+	checkInterval := 256
+	if b.ctxChecker != nil && b.ctxChecker.checkInterval > 0 && b.ctxChecker.checkInterval < checkInterval {
+		checkInterval = b.ctxChecker.checkInterval
+	}
+	bytesDecoded := 0
 
+	for {
 		// Check size limit
 		if maxBytes > 0 && len(tmp) >= maxBytes {
-			// Skip remaining hex string
-			for {
-				c := b.readByte()
-				if c == '>' || b.eof {
-					break
-				}
-			}
+			b.skipToHexEnd()
 			b.tmp = tmp
 			return string(tmp)
 		}
 
-		// Read first hex digit, skipping spaces
-		var c byte
-		for {
-			c = b.readByte()
-			if b.eof {
-				b.tmp = tmp
-				return string(tmp)
+		// Fast batch processing: read directly from buffer
+		for b.pos < len(b.buf) {
+			c := b.buf[b.pos]
+			b.pos++
+
+			// Skip whitespace using fast check
+			if c <= ' ' && (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 0) {
+				continue
 			}
+
+			// End of hex string
 			if c == '>' {
 				b.tmp = tmp
 				return string(tmp)
 			}
-			if !isSpace(c) {
+
+			// Decode first hex digit
+			x1 := hexTable[c]
+			if x1 < 0 {
+				continue // Invalid hex char, skip
+			}
+
+			// Find second hex digit
+			var x2 int8 = -1
+			for b.pos < len(b.buf) {
+				c2 := b.buf[b.pos]
+				b.pos++
+
+				// Skip whitespace
+				if c2 <= ' ' && (c2 == ' ' || c2 == '\t' || c2 == '\n' || c2 == '\r' || c2 == '\f' || c2 == 0) {
+					continue
+				}
+
+				// End of hex string with odd digit
+				if c2 == '>' {
+					tmp = append(tmp, byte(x1<<4))
+					b.tmp = tmp
+					return string(tmp)
+				}
+
+				x2 = hexTable[c2]
 				break
 			}
-		}
 
-		// Read second hex digit, skipping spaces
-		var c2 byte
-		for {
-			c2 = b.readByte()
-			if b.eof {
-				// Odd number of digits - treat as if followed by 0
-				x := unhex(c)
-				if x >= 0 {
-					tmp = append(tmp, byte(x<<4))
+			// Need to reload buffer for second digit
+			if x2 < 0 && b.pos >= len(b.buf) {
+				if !b.reload() {
+					// EOF - odd digit
+					tmp = append(tmp, byte(x1<<4))
+					b.tmp = tmp
+					return string(tmp)
 				}
+				// Continue searching for second digit
+				for b.pos < len(b.buf) {
+					c2 := b.buf[b.pos]
+					b.pos++
+					if c2 <= ' ' && (c2 == ' ' || c2 == '\t' || c2 == '\n' || c2 == '\r' || c2 == '\f' || c2 == 0) {
+						continue
+					}
+					if c2 == '>' {
+						tmp = append(tmp, byte(x1<<4))
+						b.tmp = tmp
+						return string(tmp)
+					}
+					x2 = hexTable[c2]
+					break
+				}
+			}
+
+			if x2 >= 0 {
+				tmp = append(tmp, byte(x1<<4|x2))
+				bytesDecoded++
+
+				// Periodic cancellation check
+				if bytesDecoded >= checkInterval {
+					bytesDecoded = 0
+					if b.ctxChecker != nil && b.ctxChecker.CheckNow() {
+						b.tmp = tmp
+						return nil
+					}
+				}
+			}
+			// Check size limit after adding byte
+			if maxBytes > 0 && len(tmp) >= maxBytes {
+				b.skipToHexEnd()
 				b.tmp = tmp
 				return string(tmp)
 			}
-			if c2 == '>' {
-				// Odd number of digits - treat as if followed by 0
-				x := unhex(c)
-				if x >= 0 {
-					tmp = append(tmp, byte(x<<4))
-				}
-				b.tmp = tmp
-				return string(tmp)
-			}
-			if !isSpace(c2) {
-				break
-			}
 		}
 
-		x1, x2 := unhex(c), unhex(c2)
-		if x1 >= 0 && x2 >= 0 {
-			tmp = append(tmp, byte(x1<<4|x2))
+		// Need more data - also check cancellation before blocking on reload
+		if b.ctxChecker != nil && b.ctxChecker.CheckNow() {
+			b.tmp = tmp
+			return nil
 		}
-		// Invalid hex chars are silently ignored per PDF spec
+		if !b.reload() {
+			b.tmp = tmp
+			return string(tmp)
+		}
+	}
+}
+
+// skipToHexEnd skips to the end of a hex string ('>') efficiently
+func (b *buffer) skipToHexEnd() {
+	for {
+		for b.pos < len(b.buf) {
+			if b.buf[b.pos] == '>' {
+				b.pos++
+				return
+			}
+			b.pos++
+		}
+		if !b.reload() {
+			return
+		}
 	}
 }
 
 func unhex(b byte) int {
-	switch {
-	case '0' <= b && b <= '9':
-		return int(b) - '0'
-	case 'a' <= b && b <= 'f':
-		return int(b) - 'a' + 10
-	case 'A' <= b && b <= 'F':
-		return int(b) - 'A' + 10
+	return int(hexTable[b])
+}
+
+// hexTable is a lookup table for hex decoding.
+// Values: 0-15 for valid hex digits, 255 for invalid characters.
+// Using a lookup table is significantly faster than switch statements.
+var hexTable = [256]int8{
+	'0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+	'a': 10, 'b': 11, 'c': 12, 'd': 13, 'e': 14, 'f': 15,
+	'A': 10, 'B': 11, 'C': 12, 'D': 13, 'E': 14, 'F': 15,
+}
+
+func init() {
+	// Initialize non-hex values to -1
+	for i := range hexTable {
+		if hexTable[i] == 0 && i != '0' {
+			hexTable[i] = -1
+		}
 	}
-	return -1
 }
 
 func (b *buffer) readLiteralString() token {

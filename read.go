@@ -288,25 +288,94 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 // to try. If pw returns the empty string, NewReaderEncrypted stops trying to decrypt
 // the file and returns an error.
 func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
-	buf := make([]byte, 10)
+	buf := make([]byte, 16)
 	n, _ := f.ReadAt(buf, 0)
-	if n < 9 || !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
+
+	// Check PDF header - support PDF 1.0-1.7 and 2.0
+	// Format: %PDF-X.Y followed by whitespace or binary marker
+	if n < 8 || !bytes.HasPrefix(buf, []byte("%PDF-")) {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
+
+	// Parse version number
+	major := buf[5]
+	if major != '1' && major != '2' {
+		return nil, fmt.Errorf("not a PDF file: unsupported PDF version %c.x", major)
+	}
+	if buf[6] != '.' {
+		return nil, fmt.Errorf("not a PDF file: invalid header format")
+	}
+	minor := buf[7]
+	if major == '1' {
+		if minor < '0' || minor > '9' {
+			return nil, fmt.Errorf("not a PDF file: invalid PDF 1.x version")
+		}
+	} else if major == '2' {
+		if minor < '0' || minor > '9' {
+			return nil, fmt.Errorf("not a PDF file: invalid PDF 2.x version")
+		}
+	}
+
+	// The byte after version should be whitespace, EOL, or start of binary marker
+	// Be lenient here - some PDF generators put spaces or other chars
+	if n > 8 {
+		c := buf[8]
+		if c != '\r' && c != '\n' && c != ' ' && c != '%' && c != '\t' {
+			// Log but don't fail - some non-conforming PDFs still work
+			if DebugOn {
+				fmt.Printf("warning: unexpected character after PDF version: %q\n", c)
+			}
+		}
+	}
+
 	end := size
-	const endChunk = 100
+	const endChunk = 1024 // Increased to handle PDFs with trailing data
 	buf = make([]byte, endChunk)
-	f.ReadAt(buf, end-endChunk)
-	for len(buf) > 0 && (buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r') {
+	readLen := endChunk
+	if end < int64(readLen) {
+		readLen = int(end)
+	}
+	f.ReadAt(buf[:readLen], end-int64(readLen))
+	buf = buf[:readLen]
+
+	// Trim trailing whitespace
+	for len(buf) > 0 && (buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r' || buf[len(buf)-1] == ' ' || buf[len(buf)-1] == '\t' || buf[len(buf)-1] == 0) {
 		buf = buf[:len(buf)-1]
 	}
-	buf = bytes.TrimRight(buf, "\r\n\t ")
-	if !bytes.HasSuffix(buf, []byte("%%EOF")) {
-		return nil, fmt.Errorf("not a PDF file: missing %%%%EOF")
+
+	// Find %%EOF marker - it might not be at the very end
+	eofIdx := bytes.LastIndex(buf, []byte("%%EOF"))
+	if eofIdx < 0 {
+		// Try to continue without %%EOF for damaged files
+		// This is a recovery mechanism
+		if DebugOn {
+			fmt.Println("warning: PDF missing EOF marker, attempting recovery")
+		}
+		// Still try to find startxref
+	} else {
+		// Use content up to and including %%EOF for finding startxref
+		buf = buf[:eofIdx+5]
 	}
+
+	// Trim again after potential truncation
+	buf = bytes.TrimRight(buf, "\r\n\t ")
+
 	i := findLastLine(buf, "startxref")
 	if i < 0 {
-		return nil, fmt.Errorf("malformed PDF file: missing final startxref")
+		// If we couldn't find startxref, try searching more of the file
+		if size > int64(endChunk) {
+			// Search in larger chunk
+			bigBuf := make([]byte, min(size, 10*1024))
+			f.ReadAt(bigBuf, max(0, size-int64(len(bigBuf))))
+			bigIdx := findLastLine(bigBuf, "startxref")
+			if bigIdx >= 0 {
+				buf = bigBuf
+				i = bigIdx
+			}
+		}
+		if i < 0 {
+			return nil, fmt.Errorf("malformed PDF file: missing final startxref")
+		}
 	}
 
 	r := &Reader{
@@ -318,7 +387,15 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		// A capacity of 2000 objects provides good performance while limiting memory.
 		cacheCap: 2000,
 	}
-	pos := end - endChunk + int64(i)
+	// Calculate position correctly for small files
+	// If the file is smaller than endChunk, we read from 0, so pos = i
+	// Otherwise, pos = end - bytesActuallyRead + i
+	var pos int64
+	if end < int64(endChunk) {
+		pos = int64(i)
+	} else {
+		pos = end - int64(len(buf)) + int64(i)
+	}
 	b := newBuffer(io.NewSectionReader(f, pos, end-pos), pos)
 	if b.readToken() != keyword("startxref") {
 		PutPDFBuffer(b)
@@ -332,12 +409,17 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	b = newBuffer(io.NewSectionReader(r.f, startxref, r.end-startxref), startxref)
 	xref, trailerptr, trailer, err := readXref(r, b)
 	if err != nil {
-		if rebuildErr := r.rebuildXrefTable(); rebuildErr != nil {
+		// Try to find xref by searching the file
+		if searchErr := r.searchAndParseXref(); searchErr == nil {
+			trailer = r.trailer
+			trailerptr = r.trailerptr
+		} else if rebuildErr := r.rebuildXrefTable(); rebuildErr != nil {
 			// Return more detailed error combining both failures
 			return nil, fmt.Errorf("malformed PDF: xref table at offset %d: %v, rebuild also failed: %v", startxref, err, rebuildErr)
+		} else {
+			// Rebuild successful, trailer should be set by recoverTrailer
+			trailer = r.trailer
 		}
-		// Rebuild successful, trailer should be set by recoverTrailer
-		trailer = r.trailer
 		_ = trailerptr // Not used for rebuilt xref
 	} else {
 		r.xref = xref
@@ -401,11 +483,83 @@ func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict,
 		xr, trailerptr, trailer, err = readXrefStream(r, b)
 		return
 	}
-	// Enhanced error reporting with buffer position and more context
+
+	// The startxref offset might be pointing to wrong location
+	// Try to search nearby for xref stream or xref table
 	offset := b.readOffset()
+
+	// Check if we got a dict that looks like it could be part of xref stream
+	if d, ok := tok.(dict); ok {
+		// This might be the dict part of an xref stream object
+		// Try to find the object header before this position
+		if xr, trailerptr, trailer, err = tryRecoverXrefFromDict(r, d, offset); err == nil {
+			return
+		}
+	}
+
 	// Check for common corruption patterns
 	err = diagnoseXrefCorruption(tok, offset)
 	return
+}
+
+// tryRecoverXrefFromDict attempts to recover xref information when we find
+// a dictionary at the startxref position, which might indicate the startxref
+// offset is pointing slightly off (e.g., to the stream dictionary instead of
+// the object start).
+func tryRecoverXrefFromDict(r *Reader, d dict, offset int64) ([]xref, objptr, dict, error) {
+	// Check if this dictionary has xref stream characteristics
+	if d["Type"] != name("XRef") {
+		return nil, objptr{}, nil, fmt.Errorf("dictionary is not an XRef stream")
+	}
+
+	// This looks like an xref stream dictionary
+	// We need to find the full stream object
+	// Search backward from current position to find object definition
+
+	// Read a chunk before the current position
+	searchStart := offset - 50
+	if searchStart < 0 {
+		searchStart = 0
+	}
+	chunkSize := offset - searchStart + 200
+	if chunkSize > r.end-searchStart {
+		chunkSize = r.end - searchStart
+	}
+
+	chunk := make([]byte, chunkSize)
+	_, err := r.f.ReadAt(chunk, searchStart)
+	if err != nil && err != io.EOF {
+		return nil, objptr{}, nil, err
+	}
+
+	// Look for "N M obj" pattern before the current position
+	relOffset := offset - searchStart
+	searchArea := chunk[:relOffset]
+
+	// Find last occurrence of " obj"
+	objIdx := bytes.LastIndex(searchArea, []byte(" obj"))
+	if objIdx < 0 {
+		objIdx = bytes.LastIndex(searchArea, []byte("\nobj"))
+	}
+	if objIdx < 0 {
+		objIdx = bytes.LastIndex(searchArea, []byte("\robj"))
+	}
+	if objIdx < 0 {
+		return nil, objptr{}, nil, fmt.Errorf("could not find object definition")
+	}
+
+	// Find line start
+	lineStart := objIdx
+	for lineStart > 0 && searchArea[lineStart-1] != '\n' && searchArea[lineStart-1] != '\r' {
+		lineStart--
+	}
+
+	// Parse object from this position
+	objStart := searchStart + int64(lineStart)
+	b := newBuffer(io.NewSectionReader(r.f, objStart, r.end-objStart), objStart)
+	defer PutPDFBuffer(b)
+
+	return readXrefStream(r, b)
 }
 
 // diagnoseXrefCorruption analyzes what was found instead of xref table and provides specific diagnosis
@@ -675,6 +829,137 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	return table, objptr{}, trailer, nil
 }
 
+// searchAndParseXref searches the PDF file for xref streams or xref tables
+// when the startxref offset points to an invalid location.
+// This is a recovery mechanism for PDFs with incorrect startxref values.
+func (r *Reader) searchAndParseXref() error {
+	// Limit search to reasonable file sizes to avoid memory issues
+	if r.end > 100<<20 { // 100MB limit for search
+		return errors.New("file too large for xref search")
+	}
+
+	// Read file content for searching
+	data := make([]byte, r.end)
+	if _, err := r.f.ReadAt(data, 0); err != nil && err != io.EOF {
+		return err
+	}
+
+	// Try to find xref stream first (PDF 1.5+)
+	if err := r.searchXrefStream(data); err == nil {
+		return nil
+	}
+
+	// Try to find traditional xref table
+	if err := r.searchXrefTable(data); err == nil {
+		return nil
+	}
+
+	return errors.New("could not find valid xref table or stream")
+}
+
+// searchXrefStream searches for xref stream objects in the PDF data
+func (r *Reader) searchXrefStream(data []byte) error {
+	// Look for /Type /XRef pattern which indicates xref stream
+	patterns := [][]byte{
+		[]byte("/Type/XRef"),
+		[]byte("/Type /XRef"),
+	}
+
+	var lastMatch int = -1
+	for _, pattern := range patterns {
+		idx := bytes.LastIndex(data, pattern)
+		if idx > lastMatch {
+			lastMatch = idx
+		}
+	}
+
+	if lastMatch < 0 {
+		return errors.New("no xref stream found")
+	}
+
+	// Find the start of the object containing this xref stream
+	// Search backward for "N M obj" pattern
+	searchStart := lastMatch - 500
+	if searchStart < 0 {
+		searchStart = 0
+	}
+
+	searchArea := data[searchStart:lastMatch]
+
+	// Find " obj" or line-starting "obj"
+	objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
+	bestIdx := -1
+	for _, p := range objPatterns {
+		idx := bytes.LastIndex(searchArea, p)
+		if idx > bestIdx {
+			bestIdx = idx
+		}
+	}
+
+	if bestIdx < 0 {
+		return errors.New("could not find object definition for xref stream")
+	}
+
+	// Find line start
+	lineStart := bestIdx
+	for lineStart > 0 && searchArea[lineStart-1] != '\n' && searchArea[lineStart-1] != '\r' {
+		lineStart--
+	}
+
+	objStart := int64(searchStart + lineStart)
+
+	// Try to parse this as an xref stream
+	b := newBuffer(io.NewSectionReader(r.f, objStart, r.end-objStart), objStart)
+	xref, trailerptr, trailer, err := readXrefStream(r, b)
+	PutPDFBuffer(b)
+	if err != nil {
+		return err
+	}
+
+	r.xref = xref
+	r.trailer = trailer
+	r.trailerptr = trailerptr
+	return nil
+}
+
+// searchXrefTable searches for traditional xref table in the PDF data
+func (r *Reader) searchXrefTable(data []byte) error {
+	// Look for "xref" keyword at start of line
+	patterns := [][]byte{
+		[]byte("\nxref\n"),
+		[]byte("\nxref\r"),
+		[]byte("\rxref\n"),
+		[]byte("\rxref\r"),
+	}
+
+	var lastMatch int = -1
+	for _, pattern := range patterns {
+		idx := bytes.LastIndex(data, pattern)
+		if idx > lastMatch {
+			lastMatch = idx
+		}
+	}
+
+	if lastMatch < 0 {
+		return errors.New("no xref table found")
+	}
+
+	// Start parsing from "xref" keyword
+	xrefStart := int64(lastMatch + 1) // Skip the leading newline
+
+	b := newBuffer(io.NewSectionReader(r.f, xrefStart, r.end-xrefStart), xrefStart)
+	xref, trailerptr, trailer, err := readXrefTable(r, b)
+	PutPDFBuffer(b)
+	if err != nil {
+		return err
+	}
+
+	r.xref = xref
+	r.trailer = trailer
+	r.trailerptr = trailerptr
+	return nil
+}
+
 func (r *Reader) rebuildXrefTable() error {
 	if r.end <= 0 {
 		return errors.New("cannot rebuild xref: empty file")
@@ -735,24 +1020,195 @@ func (r *Reader) rebuildXrefTable() error {
 }
 
 func (r *Reader) recoverTrailer(data []byte) error {
+	// First, try to find traditional trailer keyword
 	idx := bytes.LastIndex(data, []byte("trailer"))
-	if idx < 0 {
-		return fmt.Errorf("trailer not found in %d bytes of PDF data", len(data))
+	if idx >= 0 {
+		buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
+		buf.allowEOF = true
+		if tok := buf.readToken(); tok == keyword("trailer") {
+			obj := buf.readObject()
+			PutPDFBuffer(buf)
+			if d, ok := obj.(dict); ok {
+				r.trailer = d
+				r.trailerptr = objptr{}
+				return nil
+			}
+		} else {
+			PutPDFBuffer(buf)
+		}
 	}
-	buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
-	defer PutPDFBuffer(buf)
-	buf.allowEOF = true
-	if tok := buf.readToken(); tok != keyword("trailer") {
-		return fmt.Errorf("malformed recovered trailer at offset %d: expected 'trailer', got %T: %v", idx, tok, tok)
+
+	// For PDF 1.5+ with xref stream, try to find and parse xref stream object
+	// The xref stream contains trailer information in its dictionary
+	if err := r.recoverXrefStreamTrailer(data); err == nil {
+		return nil
 	}
-	obj := buf.readObject()
-	d, ok := obj.(dict)
-	if !ok {
-		return fmt.Errorf("recovered trailer at offset %d is not a dictionary, got %T", idx, obj)
+
+	return fmt.Errorf("trailer not found in %d bytes of PDF data", len(data))
+}
+
+// recoverXrefStreamTrailer attempts to find and parse an xref stream object
+// to recover trailer information for PDF 1.5+ files that use xref streams.
+func (r *Reader) recoverXrefStreamTrailer(data []byte) error {
+	// Search for xref stream objects by looking for "/Type /XRef" pattern
+	// This is more reliable than looking for startxref offset
+	patterns := [][]byte{
+		[]byte("/Type/XRef"),
+		[]byte("/Type /XRef"),
+		[]byte("/Type  /XRef"),
 	}
-	r.trailer = d
-	r.trailerptr = objptr{}
-	return nil
+
+	var candidates []int
+	for _, pattern := range patterns {
+		pos := 0
+		for {
+			idx := bytes.Index(data[pos:], pattern)
+			if idx < 0 {
+				break
+			}
+			candidates = append(candidates, pos+idx)
+			pos = pos + idx + len(pattern)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return fmt.Errorf("no xref stream found")
+	}
+
+	// Try each candidate, starting from the last one (most likely to be the main xref)
+	for i := len(candidates) - 1; i >= 0; i-- {
+		pos := candidates[i]
+
+		// Find the start of the object definition by searching backward for "N M obj"
+		objStart := r.findObjectStart(data, pos)
+		if objStart < 0 {
+			continue
+		}
+
+		// Try to parse the xref stream
+		buf := newBuffer(bytes.NewReader(data[objStart:]), int64(objStart))
+		buf.allowEOF = true
+		obj := buf.readObject()
+		PutPDFBuffer(buf)
+
+		objdef, ok := obj.(objdef)
+		if !ok {
+			continue
+		}
+
+		strm, ok := objdef.obj.(stream)
+		if !ok {
+			continue
+		}
+
+		// Verify this is an XRef stream
+		if strm.hdr["Type"] != name("XRef") {
+			continue
+		}
+
+		// Extract trailer-equivalent information from the xref stream header
+		trailer := make(dict)
+		// Copy relevant trailer keys from xref stream header
+		trailerKeys := []name{"Size", "Root", "Info", "ID", "Encrypt", "Prev"}
+		for _, key := range trailerKeys {
+			if val := strm.hdr[key]; val != nil {
+				trailer[key] = val
+			}
+		}
+
+		if trailer["Size"] == nil || trailer["Root"] == nil {
+			continue
+		}
+
+		// Try to parse the xref stream data to build the xref table
+		size, ok := trailer["Size"].(int64)
+		if !ok {
+			continue
+		}
+
+		table := make([]xref, size)
+		table, err := readXrefStreamData(r, strm, table, size)
+		if err != nil {
+			// Even if we can't read the stream data, we might still have valid trailer
+			// Try to use the rebuilt xref table from rebuildXrefTable
+			if len(r.xref) > 0 {
+				r.trailer = trailer
+				r.trailerptr = objdef.ptr
+				return nil
+			}
+			continue
+		}
+
+		// Merge with existing xref table if present
+		if len(r.xref) > 0 {
+			for i, entry := range table {
+				if i < len(r.xref) && r.xref[i].ptr == (objptr{}) && entry.ptr != (objptr{}) {
+					r.xref[i] = entry
+				}
+			}
+		} else {
+			r.xref = table
+		}
+
+		r.trailer = trailer
+		r.trailerptr = objdef.ptr
+		return nil
+	}
+
+	return fmt.Errorf("failed to parse any xref stream")
+}
+
+// findObjectStart searches backward from pos to find the start of an object definition
+// Returns the position of the object number, or -1 if not found
+func (r *Reader) findObjectStart(data []byte, pos int) int {
+	// Search backward for "obj" keyword
+	searchStart := pos
+	if searchStart > 200 {
+		searchStart = pos - 200
+	} else {
+		searchStart = 0
+	}
+
+	// Look for pattern like "123 0 obj" before the current position
+	chunk := data[searchStart:pos]
+
+	// Find the last occurrence of " obj" or "\nobj" or "\robj"
+	objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
+
+	bestPos := -1
+	for _, pattern := range objPatterns {
+		idx := bytes.LastIndex(chunk, pattern)
+		if idx > bestPos {
+			bestPos = idx
+		}
+	}
+
+	if bestPos < 0 {
+		return -1
+	}
+
+	// Now find the start of the line containing this "obj"
+	lineStart := searchStart + bestPos
+	for lineStart > 0 && data[lineStart-1] != '\n' && data[lineStart-1] != '\r' {
+		lineStart--
+	}
+
+	// Verify this looks like an object definition (starts with number)
+	if lineStart >= len(data) {
+		return -1
+	}
+
+	// Skip whitespace
+	for lineStart < pos && (data[lineStart] == ' ' || data[lineStart] == '\t') {
+		lineStart++
+	}
+
+	// Check if it starts with a digit
+	if lineStart < len(data) && data[lineStart] >= '0' && data[lineStart] <= '9' {
+		return lineStart
+	}
+
+	return -1
 }
 
 func readXrefTableData(b *buffer, table []xref) ([]xref, error) {

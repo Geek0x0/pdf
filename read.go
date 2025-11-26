@@ -324,7 +324,9 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		readMore, _ := f.ReadAt(more, int64(len(buf)))
 		buf = append(buf, more[:readMore]...)
 	}
-	if sigIdx+7 >= len(buf) {
+	// sigIdx+7 points to the last character of version (e.g., '7' in '%PDF-1.7')
+	// We need at least sigIdx+8 bytes to have the complete version string
+	if sigIdx+8 > len(buf) {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 

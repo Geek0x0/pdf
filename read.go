@@ -288,24 +288,50 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 // to try. If pw returns the empty string, NewReaderEncrypted stops trying to decrypt
 // the file and returns an error.
 func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
-	buf := make([]byte, 16)
-	n, _ := f.ReadAt(buf, 0)
+	const headerSearchLimit = 4096
+	headerProbe := headerSearchLimit
+	if size < int64(headerProbe) {
+		headerProbe = int(size)
+	}
+	if headerProbe < 8 {
+		return nil, fmt.Errorf("not a PDF file: invalid header")
+	}
 
-	// Check PDF header - support PDF 1.0-1.7 and 2.0
-	// Format: %PDF-X.Y followed by whitespace or binary marker
-	if n < 8 || !bytes.HasPrefix(buf, []byte("%PDF-")) {
+	buf := make([]byte, headerProbe)
+	n, _ := f.ReadAt(buf, 0)
+	buf = buf[:n]
+
+	// Search for the %PDF- signature within the first few KB to tolerate BOM/whitespace
+	sig := []byte("%PDF-")
+	sigIdx := bytes.Index(buf, sig)
+	if sigIdx < 0 {
+		return nil, fmt.Errorf("not a PDF file: invalid header")
+	}
+
+	// Ensure we have enough bytes after the signature to parse the version
+	const minHeaderLen = 9 // %PDF-X.Y plus a following byte
+	required := sigIdx + minHeaderLen
+	if int64(required) > size {
+		return nil, fmt.Errorf("not a PDF file: invalid header")
+	}
+	if required > len(buf) {
+		more := make([]byte, required-len(buf))
+		readMore, _ := f.ReadAt(more, int64(len(buf)))
+		buf = append(buf, more[:readMore]...)
+	}
+	if sigIdx+7 >= len(buf) {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 
 	// Parse version number
-	major := buf[5]
+	major := buf[sigIdx+5]
 	if major != '1' && major != '2' {
 		return nil, fmt.Errorf("not a PDF file: unsupported PDF version %c.x", major)
 	}
-	if buf[6] != '.' {
+	if buf[sigIdx+6] != '.' {
 		return nil, fmt.Errorf("not a PDF file: invalid header format")
 	}
-	minor := buf[7]
+	minor := buf[sigIdx+7]
 	if major == '1' {
 		if minor < '0' || minor > '9' {
 			return nil, fmt.Errorf("not a PDF file: invalid PDF 1.x version")
@@ -316,10 +342,10 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		}
 	}
 
-	// The byte after version should be whitespace, EOL, or start of binary marker
-	// Be lenient here - some PDF generators put spaces or other chars
-	if n > 8 {
-		c := buf[8]
+	// The byte after version should be whitespace, EOL, or start of binary marker.
+	// We still log unexpected characters but do not fail parsing.
+	if len(buf) > sigIdx+8 {
+		c := buf[sigIdx+8]
 		if c != '\r' && c != '\n' && c != ' ' && c != '%' && c != '\t' {
 			// Log but don't fail - some non-conforming PDFs still work
 			if DebugOn {
@@ -761,7 +787,12 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 			case 1:
 				table[x] = xref{ptr: objptr{uint32(x), uint16(v3)}, offset: int64(v2)}
 			case 2:
+				// Type 2: Compressed object in object stream (PDF 1.5+)
+				// v2 = object number of object stream, v3 = index within object stream
 				table[x] = xref{ptr: objptr{uint32(x), 0}, inStream: true, stream: objptr{uint32(v2), 0}, offset: int64(v3)}
+				if DebugOn {
+					fmt.Printf("xref entry %d: object in stream (obj %d index %d)\n", x, v2, v3)
+				}
 			default:
 				if DebugOn {
 					fmt.Printf("invalid xref stream type %d: %x\n", v1, buf)
@@ -1682,6 +1713,9 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 		}
 		lr := lzw.NewReader(rd, lzw.MSB, 8)
 		return applyPredictor(lr, param)
+	case "ASCIIHexDecode":
+		// ASCIIHexDecode: decodes data encoded in hexadecimal representation
+		return newASCIIHexDecoder(rd)
 	case "ASCII85Decode":
 		cleanASCII85 := newAlphaReader(rd)
 		decoder := ascii85.NewDecoder(cleanASCII85)
@@ -1834,6 +1868,135 @@ func (r *runLengthReader) fill() error {
 	}
 	r.buf = bytes.Repeat([]byte{val}, count)
 	return nil
+}
+
+// asciiHexDecoder decodes ASCIIHexDecode filter data with optimized performance
+type asciiHexDecoder struct {
+	r          *bufio.Reader
+	err        error
+	endSeen    bool
+	pendingNib int8 // Pending high nibble for odd-length hex strings (-1 = none)
+}
+
+func newASCIIHexDecoder(rd io.Reader) io.Reader {
+	return &asciiHexDecoder{
+		r:          bufio.NewReader(rd),
+		pendingNib: -1,
+	}
+}
+
+// Read implements optimized batch decoding with lookup table
+func (d *asciiHexDecoder) Read(p []byte) (int, error) {
+	if d.err != nil {
+		return 0, d.err
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if d.endSeen {
+		return 0, io.EOF
+	}
+
+	n := 0
+	const whitespaceMask = uint64(1)<<' ' | 1<<'\t' | 1<<'\n' | 1<<'\r' | 1<<'\f' | 1<<0
+
+	// Handle pending nibble from previous read
+	if d.pendingNib >= 0 {
+		h2, eof := d.readNextHexNibble(whitespaceMask)
+		if eof {
+			if d.endSeen {
+				// Odd length, output high nibble with 0 padding
+				p[n] = byte(d.pendingNib << 4)
+				n++
+				d.pendingNib = -1
+				return n, io.EOF
+			}
+			return n, d.err
+		}
+		if h2 >= 0 {
+			p[n] = byte(d.pendingNib<<4 | h2)
+			n++
+			d.pendingNib = -1
+		}
+	}
+
+	// Batch decode: process pairs of hex digits
+	for n < len(p) && !d.endSeen {
+		// Get first hex nibble
+		h1, eof := d.readNextHexNibble(whitespaceMask)
+		if eof {
+			if d.endSeen && n == 0 {
+				return 0, io.EOF
+			}
+			return n, d.err
+		}
+		if h1 < 0 {
+			continue // Skip invalid
+		}
+
+		// Get second hex nibble
+		h2, eof := d.readNextHexNibble(whitespaceMask)
+		if eof {
+			if d.endSeen {
+				// Odd length, output high nibble with 0 padding
+				p[n] = byte(h1 << 4)
+				n++
+				return n, io.EOF
+			}
+			// Store pending nibble for next Read call
+			d.pendingNib = h1
+			return n, d.err
+		}
+		if h2 < 0 {
+			// Second nibble invalid, save first for retry
+			d.pendingNib = h1
+			continue
+		}
+
+		// Combine nibbles
+		p[n] = byte(h1<<4 | h2)
+		n++
+	}
+
+	if d.endSeen && n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// readNextHexNibble reads the next hex nibble using lookup table
+// Returns nibble value (0-15), and EOF flag
+func (d *asciiHexDecoder) readNextHexNibble(whitespaceMask uint64) (int8, bool) {
+	for {
+		c, err := d.r.ReadByte()
+		if err != nil {
+			d.err = err
+			return -1, true
+		}
+
+		// Fast whitespace check using bitmask (space, tab, lf, cr, ff, null)
+		if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+			continue
+		}
+
+		// End of data marker
+		if c == '>' {
+			d.endSeen = true
+			d.err = io.EOF
+			return -1, true
+		}
+
+		// Use lookup table for hex conversion (much faster than multiple if statements)
+		nib := hexTable[c]
+		if nib >= 0 {
+			return nib, false
+		}
+
+		// Invalid character, skip it (be lenient)
+		if DebugOn {
+			fmt.Printf("ASCIIHexDecode: skipping invalid character: %c (%d)\n", c, c)
+		}
+	}
 }
 
 var passwordPad = []byte{

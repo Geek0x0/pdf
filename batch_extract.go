@@ -8,6 +8,7 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // FontCacheType specifies which font cache implementation to use
@@ -67,6 +68,14 @@ type BatchExtractOptions struct {
 	// - FontCacheOptimized: High-performance optimized cache (10-85x faster)
 	// Only used when UseFontCache is true
 	FontCacheType FontCacheType
+
+	// PageTimeout is the maximum time allowed for processing a single page
+	// If zero, defaults to 30 seconds. Set to negative value to disable.
+	PageTimeout time.Duration
+
+	// ParseLimits configures resource limits for parsing operations
+	// If nil, uses DefaultParseLimits()
+	ParseLimits *ParseLimits
 }
 
 // BatchResult contains the result of extracting a single page
@@ -90,6 +99,15 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 	}
 	if opts.PageBufferSize <= 0 {
 		opts.PageBufferSize = 2048
+	}
+	// Set default page timeout
+	if opts.PageTimeout == 0 {
+		opts.PageTimeout = 30 * time.Second
+	}
+	// Set default parse limits
+	if opts.ParseLimits == nil {
+		limits := DefaultParseLimits()
+		opts.ParseLimits = &limits
 	}
 
 	// Initialize font cache if enabled
@@ -186,8 +204,18 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 		default:
 		}
 
-		// Extract page - wrap in function to ensure defer runs per iteration
+		// Extract page with timeout - wrap in function to ensure defer runs per iteration
 		func() {
+			// Create page-level context with timeout if configured
+			var pageCtx context.Context
+			var cancel context.CancelFunc
+			if opts.PageTimeout > 0 {
+				pageCtx, cancel = context.WithTimeout(opts.Context, opts.PageTimeout)
+			} else {
+				pageCtx, cancel = context.WithCancel(opts.Context)
+			}
+			defer cancel()
+
 			page := r.Page(pageNum)
 			var text string
 			var err error
@@ -204,10 +232,32 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 				page.Cleanup()
 			}()
 
-			if opts.SmartOrdering {
-				text, err = page.GetPlainTextWithSmartOrdering(nil)
-			} else {
-				text, err = page.GetPlainText(nil)
+			// Use a channel to handle timeout
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if opts.SmartOrdering {
+					text, err = page.GetPlainTextWithSmartOrdering(nil)
+				} else {
+					text, err = page.GetPlainText(nil)
+				}
+			}()
+
+			// Wait for completion or timeout
+			select {
+			case <-done:
+				// Extraction completed
+			case <-pageCtx.Done():
+				// Timeout or cancellation
+				if pageCtx.Err() == context.DeadlineExceeded {
+					err = &PDFError{
+						Op:   "extract page",
+						Page: pageNum,
+						Err:  ErrTimeout,
+					}
+				} else {
+					err = pageCtx.Err()
+				}
 			}
 
 			// Send result

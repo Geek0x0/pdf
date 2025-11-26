@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"context"
 	"io"
 )
 
@@ -53,6 +54,17 @@ func newDict() Value {
 //
 // There is no support for executable blocks, among other limitations.
 func Interpret(strm Value, do func(stk *Stack, op string)) {
+	InterpretWithContext(context.Background(), strm, do)
+}
+
+// InterpretWithContext is like Interpret but accepts a context for cancellation support.
+// When the context is cancelled, interpretation stops and returns.
+func InterpretWithContext(ctx context.Context, strm Value, do func(stk *Stack, op string)) {
+	InterpretWithContextAndLimits(ctx, strm, do, nil)
+}
+
+// InterpretWithContextAndLimits is like InterpretWithContext but also accepts parse limits.
+func InterpretWithContextAndLimits(ctx context.Context, strm Value, do func(stk *Stack, op string), limits *ParseLimits) {
 	var stk Stack
 	var dicts []dict
 	s := strm
@@ -61,7 +73,19 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 		strmlen = strm.Len()
 	}
 
+	// Create context checker for efficient cancellation checking
+	checkInterval := 1000
+	if limits != nil && limits.CheckInterval > 0 {
+		checkInterval = limits.CheckInterval
+	}
+	ctxChecker := newContextChecker(ctx, checkInterval)
+
 	for i := 0; i < strmlen; i++ {
+		// Check cancellation between streams
+		if ctxChecker.CheckNow() {
+			return
+		}
+
 		if strm.Kind() == Array {
 			s = strm.Index(i)
 		}
@@ -72,9 +96,16 @@ func Interpret(strm Value, do func(stk *Stack, op string)) {
 		b.allowEOF = true
 		b.allowObjptr = false
 		b.allowStream = false
+		b.ctxChecker = ctxChecker
+		b.limits = limits
 
 	Reading:
 		for {
+			// Periodic cancellation check (every iteration)
+			if ctxChecker.Check() {
+				return
+			}
+
 			tok := b.readToken()
 			if tok == io.EOF {
 				break

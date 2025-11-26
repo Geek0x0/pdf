@@ -175,6 +175,10 @@ func PutPDFBuffer(b *buffer) {
 	b.key = b.key[:0]
 	b.useAES = false
 	b.objptr = objptr{}
+	// Reset context support fields
+	b.ctxChecker = nil
+	b.limits = nil
+	b.readErr = nil
 	pdfBufferPool.Put(b)
 }
 

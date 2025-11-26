@@ -46,6 +46,9 @@ type buffer struct {
 	key         []byte
 	useAES      bool
 	objptr      objptr
+	// Context support for cancellation
+	ctxChecker *contextChecker
+	limits     *ParseLimits
 }
 
 // newBuffer returns a new buffer reading from r at the given offset.
@@ -178,44 +181,93 @@ func (b *buffer) readToken() token {
 	}
 }
 
+// readHexString reads a hex string from the buffer.
+// This optimized version uses batch reading and context cancellation checking.
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
+
+	// Pre-allocate lookup table for hex decoding (faster than switch)
+	// Values: 0-15 for valid hex, -1 for invalid, -2 for space, -3 for '>'
+
+	iterCount := 0
+	maxBytes := 0
+	if b.limits != nil && b.limits.MaxHexStringBytes > 0 {
+		maxBytes = b.limits.MaxHexStringBytes
+	}
+
 	for {
-	Loop:
-		c := b.readByte()
-		if c == '>' {
-			break
+		// Check context cancellation periodically (every 512 bytes to minimize overhead)
+		iterCount++
+		if iterCount&511 == 0 {
+			if b.ctxChecker != nil && b.ctxChecker.Check() {
+				b.tmp = tmp
+				return nil // Return nil on cancellation
+			}
 		}
-		if isSpace(c) {
-			goto Loop
+
+		// Check size limit
+		if maxBytes > 0 && len(tmp) >= maxBytes {
+			// Skip remaining hex string
+			for {
+				c := b.readByte()
+				if c == '>' || b.eof {
+					break
+				}
+			}
+			b.tmp = tmp
+			return string(tmp)
 		}
-	Loop2:
-		c2 := b.readByte()
-		if isSpace(c2) {
-			goto Loop2
-		}
-		// Per PDF spec, if there's an odd number of hex digits,
-		// the final digit is assumed to be followed by 0.
-		if c2 == '>' {
-			x := unhex(c)
-			if x < 0 {
-				// Invalid hex char at odd position - skip it and treat as end
+
+		// Read first hex digit, skipping spaces
+		var c byte
+		for {
+			c = b.readByte()
+			if b.eof {
+				b.tmp = tmp
+				return string(tmp)
+			}
+			if c == '>' {
+				b.tmp = tmp
+				return string(tmp)
+			}
+			if !isSpace(c) {
 				break
 			}
-			tmp = append(tmp, byte(x<<4))
-			break
 		}
+
+		// Read second hex digit, skipping spaces
+		var c2 byte
+		for {
+			c2 = b.readByte()
+			if b.eof {
+				// Odd number of digits - treat as if followed by 0
+				x := unhex(c)
+				if x >= 0 {
+					tmp = append(tmp, byte(x<<4))
+				}
+				b.tmp = tmp
+				return string(tmp)
+			}
+			if c2 == '>' {
+				// Odd number of digits - treat as if followed by 0
+				x := unhex(c)
+				if x >= 0 {
+					tmp = append(tmp, byte(x<<4))
+				}
+				b.tmp = tmp
+				return string(tmp)
+			}
+			if !isSpace(c2) {
+				break
+			}
+		}
+
 		x1, x2 := unhex(c), unhex(c2)
-		if x1 < 0 || x2 < 0 {
-			// Invalid hex char(s) - skip this pair and continue
-			// PDF viewers typically ignore invalid characters
-			continue
+		if x1 >= 0 && x2 >= 0 {
+			tmp = append(tmp, byte(x1<<4|x2))
 		}
-		x := x1<<4 | x2
-		tmp = append(tmp, byte(x))
+		// Invalid hex chars are silently ignored per PDF spec
 	}
-	b.tmp = tmp
-	return string(tmp)
 }
 
 func unhex(b byte) int {

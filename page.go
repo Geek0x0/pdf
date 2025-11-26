@@ -6,6 +6,7 @@ package pdf
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -624,11 +625,20 @@ Parse:
 }
 
 func readCmap(toUnicode Value) *cmap {
+	return readCmapWithContext(context.Background(), toUnicode)
+}
+
+// readCmapWithContext reads a cmap with context cancellation support.
+// If ctx is nil, it uses context.Background().
+func readCmapWithContext(ctx context.Context, toUnicode Value) *cmap {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	n := -1
 	var m cmap
 	ok := true
 	var cmapName string
-	Interpret(toUnicode, func(stk *Stack, op string) {
+	InterpretWithContext(ctx, toUnicode, func(stk *Stack, op string) {
 		if !ok {
 			return
 		}

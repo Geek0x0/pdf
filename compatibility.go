@@ -35,16 +35,17 @@ func (v PDFVersion) IsSupported() bool {
 
 // PDFCompatibilityInfo holds compatibility information
 type PDFCompatibilityInfo struct {
-	Version         PDFVersion
-	IsLinearized    bool
-	SubFormat       string // "PDF/A", "PDF/X", or ""
-	Encryption      string
-	HasTransparency bool
-	HasLayers       bool
-	HasForms        bool
-	HasJavaScript   bool
-	Warnings        []string
-	Errors          []string
+	Version             PDFVersion
+	IsLinearized        bool
+	LinearizationParams map[string]interface{}
+	SubFormat           string // "PDF/A", "PDF/X", or ""
+	Encryption          string
+	HasTransparency     bool
+	HasLayers           bool
+	HasForms            bool
+	HasJavaScript       bool
+	Warnings            []string
+	Errors              []string
 }
 
 // CheckPDFCompatibility analyzes a PDF file for compatibility

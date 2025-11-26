@@ -144,6 +144,10 @@ type Reader struct {
 	cacheCap      int
 	fontCache     *FontCache
 	compatibility *PDFCompatibilityInfo // Compatibility information
+
+	// Cache for object streams to avoid re-parsing
+	objStreamCache   map[uint32]map[int64]int64
+	objStreamCacheMu sync.RWMutex
 }
 
 type xref struct {
@@ -362,6 +366,10 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	f.ReadAt(buf[:readLen], end-int64(readLen))
 	buf = buf[:readLen]
 
+	// Keep original buffer before trimming for fallback search
+	originalBuf := make([]byte, len(buf))
+	copy(originalBuf, buf)
+
 	// Trim trailing whitespace
 	for len(buf) > 0 && (buf[len(buf)-1] == '\n' || buf[len(buf)-1] == '\r' || buf[len(buf)-1] == ' ' || buf[len(buf)-1] == '\t' || buf[len(buf)-1] == 0) {
 		buf = buf[:len(buf)-1]
@@ -381,25 +389,71 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		buf = buf[:eofIdx+5]
 	}
 
-	// Trim again after potential truncation
-	buf = bytes.TrimRight(buf, "\r\n\t ")
+	// Multi-layer search strategy for startxref
+	var i int
 
-	i := findLastLine(buf, "startxref")
+	// Strategy 1: Try with original untrimmed buffer first
+	i = findLastLine(originalBuf, "startxref")
+	if i >= 0 {
+		buf = originalBuf
+		if DebugOn {
+			fmt.Println("Found startxref in original buffer")
+		}
+	}
+
+	// Strategy 2: Try with EOF-truncated buffer
 	if i < 0 {
-		// If we couldn't find startxref, try searching more of the file
-		if size > int64(endChunk) {
-			// Search in larger chunk
-			bigBuf := make([]byte, min(size, 10*1024))
-			f.ReadAt(bigBuf, max(0, size-int64(len(bigBuf))))
-			bigIdx := findLastLine(bigBuf, "startxref")
-			if bigIdx >= 0 {
-				buf = bigBuf
-				i = bigIdx
+		i = findLastLine(buf, "startxref")
+		if i >= 0 && DebugOn {
+			fmt.Println("Found startxref in EOF-truncated buffer")
+		}
+	}
+
+	// Strategy 3: Try with larger chunk if still not found
+	if i < 0 && size > int64(endChunk) {
+		// Search in larger chunk (up to 10KB)
+		chunkSize := int64(10 * 1024)
+		if size < chunkSize {
+			chunkSize = size
+		}
+		bigBuf := make([]byte, chunkSize)
+		readOffset := size - chunkSize
+		if readOffset < 0 {
+			readOffset = 0
+		}
+		f.ReadAt(bigBuf, readOffset)
+		bigIdx := findLastLine(bigBuf, "startxref")
+		if bigIdx >= 0 {
+			buf = bigBuf
+			i = bigIdx
+			if DebugOn {
+				fmt.Println("Found startxref in larger buffer")
 			}
 		}
-		if i < 0 {
-			return nil, fmt.Errorf("malformed PDF file: missing final startxref")
+	}
+
+	// Strategy 4: Last resort - search without strict line boundaries
+	if i < 0 {
+		// Try simple byte search as last resort
+		simpleIdx := bytes.LastIndex(buf, []byte("startxref"))
+		if simpleIdx >= 0 {
+			// Verify it's on its own line by checking context
+			if simpleIdx > 0 && (buf[simpleIdx-1] == '\n' || buf[simpleIdx-1] == '\r') {
+				i = simpleIdx
+				if DebugOn {
+					fmt.Println("Found startxref using fallback simple search")
+				}
+			}
 		}
+	}
+
+	// All strategies failed
+	if i < 0 {
+		if DebugOn {
+			fmt.Printf("Failed to find startxref. Buffer length: %d, Last 100 bytes: %q\n",
+				len(buf), string(buf[max(0, len(buf)-100):]))
+		}
+		return nil, fmt.Errorf("malformed PDF file: missing startxref")
 	}
 
 	r := &Reader{
@@ -409,7 +463,8 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 		// CRITICAL FIX: Set default cache capacity to prevent unbounded growth.
 		// Without this limit, objCache can grow to gigabytes during batch processing.
 		// A capacity of 2000 objects provides good performance while limiting memory.
-		cacheCap: 2000,
+		cacheCap:       2000,
+		objStreamCache: make(map[uint32]map[int64]int64),
 	}
 
 	// Initialize compatibility information
@@ -508,8 +563,34 @@ func NewReaderLinearized(f io.ReaderAt, size int64, pw func() string) (*Reader, 
 		if DebugOn {
 			fmt.Println("PDF is linearized, enabling optimized reading")
 		}
-		// Linearized PDFs can be read more efficiently
-		// For now, we just mark it - future optimizations can be added here
+
+		// Attempt to extract Linearization Parameter Dictionary
+		// It must be the first object in the file.
+		b := newBuffer(io.NewSectionReader(f, 0, size), 0)
+
+		// readToken skips comments (header), so the first token should be the object number.
+		tok1 := b.readToken()
+		tok2 := b.readToken()
+		tok3 := b.readToken()
+
+		if _, ok1 := tok1.(int64); ok1 {
+			if _, ok2 := tok2.(int64); ok2 {
+				if kw, ok3 := tok3.(keyword); ok3 && kw == "obj" {
+					obj := b.readObject()
+					if d, ok := obj.(dict); ok {
+						// Check if it is indeed the linearization dict
+						if _, isLin := d["Linearized"]; isLin {
+							params := make(map[string]interface{})
+							for k, v := range d {
+								params[string(k)] = v
+							}
+							r.compatibility.LinearizationParams = params
+						}
+					}
+				}
+			}
+		}
+		PutPDFBuffer(b)
 	}
 
 	return r, nil
@@ -850,6 +931,26 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	trailer, ok := b.readObject().(dict)
 	if !ok {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref table not followed by trailer dictionary")
+	}
+
+	// Hybrid Reference Support: Check for XRefStm
+	if xrefStmOffset, ok := trailer["XRefStm"].(int64); ok {
+		b2 := newBuffer(io.NewSectionReader(r.f, xrefStmOffset, r.end-xrefStmOffset), xrefStmOffset)
+		stmTable, _, _, err := readXrefStream(r, b2)
+		PutPDFBuffer(b2)
+		if err != nil {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: processing XRefStm at %d: %v", xrefStmOffset, err)
+		}
+		if len(stmTable) > len(table) {
+			newTable := make([]xref, len(stmTable))
+			copy(newTable, table)
+			table = newTable
+		}
+		for i, x := range stmTable {
+			if x.ptr != (objptr{}) {
+				table[i] = x
+			}
+		}
 	}
 
 	for prevoff := trailer["Prev"]; prevoff != nil; {
@@ -1308,10 +1409,22 @@ func findLastLine(buf []byte, s string) int {
 	max := len(buf)
 	for {
 		i := bytes.LastIndex(buf[:max], bs)
-		if i <= 0 || i+len(bs) >= len(buf) {
+		if i <= 0 {
 			return -1
 		}
-		if (buf[i-1] == '\n' || buf[i-1] == '\r') && (buf[i+len(bs)] == '\n' || buf[i+len(bs)] == '\r') {
+		// Check if we have a newline/CR before the keyword
+		if buf[i-1] != '\n' && buf[i-1] != '\r' {
+			max = i
+			continue
+		}
+		// Check if we have a newline/CR after (or keyword is at/near end of buffer)
+		afterPos := i + len(bs)
+		if afterPos >= len(buf) {
+			// Keyword is at or near end of buffer - this is acceptable
+			// This handles cases where TrimRight removed trailing whitespace
+			return i
+		}
+		if buf[afterPos] == '\n' || buf[afterPos] == '\r' {
 			return i
 		}
 		max = i
@@ -1600,6 +1713,8 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 		var obj object
 		if xref.inStream {
 			strm := r.resolve(parent, xref.stream)
+			currentStreamID := xref.stream.id
+
 		Search:
 			for {
 				if strm.Kind() != Stream {
@@ -1616,27 +1731,81 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 					// Missing First entry, return empty
 					return Value{}
 				}
-				b := newBuffer(strm.Reader(), 0)
-				b.allowEOF = true
-				for i := 0; i < n; i++ {
-					id, _ := b.readToken().(int64)
-					off, _ := b.readToken().(int64)
-					if uint32(id) == ptr.id {
-						b.seekForward(first + off)
-						x = b.readObject()
-						r.storeCachedObject(ptr, x)
-						PutPDFBuffer(b)
-						break Search
+
+				var offset int64
+				found := false
+
+				if currentStreamID != 0 {
+					// Check cache
+					r.objStreamCacheMu.RLock()
+					if cache, ok := r.objStreamCache[currentStreamID]; ok {
+						if off, ok := cache[int64(ptr.id)]; ok {
+							offset = off
+							found = true
+						}
 					}
+					r.objStreamCacheMu.RUnlock()
+
+					if !found {
+						// Check if populated
+						r.objStreamCacheMu.RLock()
+						_, populated := r.objStreamCache[currentStreamID]
+						r.objStreamCacheMu.RUnlock()
+
+						if !populated {
+							// Populate cache
+							b := newBuffer(strm.Reader(), 0)
+							b.allowEOF = true
+							streamCache := make(map[int64]int64, n)
+							for i := 0; i < n; i++ {
+								id, _ := b.readToken().(int64)
+								off, _ := b.readToken().(int64)
+								streamCache[id] = first + off
+							}
+							PutPDFBuffer(b)
+
+							r.objStreamCacheMu.Lock()
+							r.objStreamCache[currentStreamID] = streamCache
+							r.objStreamCacheMu.Unlock()
+
+							if off, ok := streamCache[int64(ptr.id)]; ok {
+								offset = off
+								found = true
+							}
+						}
+					}
+				} else {
+					// Fallback for Extends streams
+					b := newBuffer(strm.Reader(), 0)
+					b.allowEOF = true
+					for i := 0; i < n; i++ {
+						id, _ := b.readToken().(int64)
+						off, _ := b.readToken().(int64)
+						if uint32(id) == ptr.id {
+							offset = first + off
+							found = true
+							break
+						}
+					}
+					PutPDFBuffer(b)
 				}
+
+				if found {
+					b := newBuffer(strm.Reader(), 0)
+					b.seekForward(offset)
+					x = b.readObject()
+					r.storeCachedObject(ptr, x)
+					PutPDFBuffer(b)
+					break Search
+				}
+
 				ext := strm.Key("Extends")
 				if ext.Kind() != Stream {
 					// Cannot find object in stream, return empty
-					PutPDFBuffer(b)
 					return Value{}
 				}
-				PutPDFBuffer(b)
 				strm = ext
+				currentStreamID = 0
 			}
 		} else {
 			b := newBuffer(io.NewSectionReader(r.f, xref.offset, r.end-xref.offset), xref.offset)

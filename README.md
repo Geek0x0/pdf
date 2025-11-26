@@ -34,7 +34,11 @@ GoPDF is a powerful PDF processing library written in Go, focused on efficient t
 - **Compression Formats**: Flate, LZW, ASCII85, RunLength
 - **Encryption Support**: RC4, AES encrypted PDFs
 - **Thread Safety**: Fully concurrent-safe operations
-- **Error Handling**: Detailed error context and recovery mechanisms
+- **Robust Error Handling**: Graceful degradation for malformed PDFs
+  - Library never panics on invalid input (errors returned instead)
+  - Tolerates missing PDF structure elements (endobj, endstream, etc.)
+  - Handles malformed hex strings, names, and escape sequences
+  - Graceful handling of truncated or corrupted files
 
 ## 📦 Installation
 
@@ -155,37 +159,7 @@ func processTexts(texts []string) string {
 }
 ```
 
-## 🚀 Quick Start
-
-### Basic Text Extraction
-
-```go
-package main
-
-import (
-    "fmt"
-    "log"
-    "github.com/Geek0x0/pdf"
-)
-
-func main() {
-    // Open PDF file
-    file, reader, err := gopdf.Open("example.pdf")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer file.Close()
-
-    // Extract plain text
-    textReader, err := reader.GetPlainText()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Read text content
-    // ... use textReader
-}
-```
+### Text Block Classification
 
 ```go
 // Extract text with context
@@ -309,6 +283,7 @@ GoPDF uses a modular architecture with clear component responsibilities:
 
 ```
 gopdf/
+├── lex.go                       # PDF lexical analysis and tokenization
 ├── read.go                      # PDF file reading and parsing
 ├── text.go                      # Core text extraction logic
 ├── page.go                      # Page structure analysis
@@ -320,7 +295,7 @@ gopdf/
 ├── parallel_processing.go       # Parallel processing
 ├── performance.go               # Performance optimization
 ├── async_io.go                  # Asynchronous I/O
-├── errors.go                    # Error handling
+├── errors.go                    # Error handling and wrapping
 │
 ├── Performance Optimizations (2024)
 ├── sharded_cache.go             # 256-shard high-performance cache

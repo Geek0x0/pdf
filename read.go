@@ -1885,7 +1885,7 @@ func newASCIIHexDecoder(rd io.Reader) io.Reader {
 	}
 }
 
-// Read implements optimized batch decoding with lookup table
+// Read implements highly optimized batch decoding with inlined hot path
 func (d *asciiHexDecoder) Read(p []byte) (int, error) {
 	if d.err != nil {
 		return 0, d.err
@@ -1902,101 +1902,103 @@ func (d *asciiHexDecoder) Read(p []byte) (int, error) {
 
 	// Handle pending nibble from previous read
 	if d.pendingNib >= 0 {
-		h2, eof := d.readNextHexNibble(whitespaceMask)
-		if eof {
-			if d.endSeen {
-				// Odd length, output high nibble with 0 padding
+		// Inlined: find next hex nibble
+		for {
+			c, err := d.r.ReadByte()
+			if err != nil {
+				d.err = err
+				if d.endSeen {
+					p[n] = byte(d.pendingNib << 4)
+					n++
+					d.pendingNib = -1
+					return n, io.EOF
+				}
+				return n, d.err
+			}
+			if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+				continue
+			}
+			if c == '>' {
+				d.endSeen = true
+				d.err = io.EOF
 				p[n] = byte(d.pendingNib << 4)
 				n++
 				d.pendingNib = -1
 				return n, io.EOF
 			}
-			return n, d.err
-		}
-		if h2 >= 0 {
-			p[n] = byte(d.pendingNib<<4 | h2)
-			n++
-			d.pendingNib = -1
+			h2 := hexTable[c]
+			if h2 >= 0 {
+				p[n] = byte(d.pendingNib<<4 | h2)
+				n++
+				d.pendingNib = -1
+				break
+			}
+			// Invalid char, skip
 		}
 	}
 
-	// Batch decode: process pairs of hex digits
+	// Hot path: inline the decode loop for maximum performance
+	r := d.r
 	for n < len(p) && !d.endSeen {
-		// Get first hex nibble
-		h1, eof := d.readNextHexNibble(whitespaceMask)
-		if eof {
-			if d.endSeen && n == 0 {
-				return 0, io.EOF
+		var h1, h2 int8
+
+		// Find first hex nibble - inlined for speed
+		for {
+			c, err := r.ReadByte()
+			if err != nil {
+				d.err = err
+				if n == 0 {
+					return 0, err
+				}
+				return n, nil
 			}
-			return n, d.err
-		}
-		if h1 < 0 {
-			continue // Skip invalid
+			if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+				continue
+			}
+			if c == '>' {
+				d.endSeen = true
+				if n == 0 {
+					return 0, io.EOF
+				}
+				return n, nil
+			}
+			h1 = hexTable[c]
+			if h1 >= 0 {
+				break
+			}
+			// Invalid char, continue searching
 		}
 
-		// Get second hex nibble
-		h2, eof := d.readNextHexNibble(whitespaceMask)
-		if eof {
-			if d.endSeen {
-				// Odd length, output high nibble with 0 padding
+		// Find second hex nibble - inlined for speed
+		for {
+			c, err := r.ReadByte()
+			if err != nil {
+				d.err = err
+				d.pendingNib = h1
+				return n, nil
+			}
+			if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+				continue
+			}
+			if c == '>' {
+				d.endSeen = true
 				p[n] = byte(h1 << 4)
 				n++
 				return n, io.EOF
 			}
-			// Store pending nibble for next Read call
-			d.pendingNib = h1
-			return n, d.err
-		}
-		if h2 < 0 {
-			// Second nibble invalid, save first for retry
-			d.pendingNib = h1
-			continue
+			h2 = hexTable[c]
+			if h2 >= 0 {
+				break
+			}
+			// Invalid char, continue searching
 		}
 
-		// Combine nibbles
+		// Combine nibbles and output
 		p[n] = byte(h1<<4 | h2)
 		n++
 	}
 
-	if d.endSeen && n == 0 {
-		return 0, io.EOF
-	}
 	return n, nil
-}
-
-// readNextHexNibble reads the next hex nibble using lookup table
-// Returns nibble value (0-15), and EOF flag
-func (d *asciiHexDecoder) readNextHexNibble(whitespaceMask uint64) (int8, bool) {
-	for {
-		c, err := d.r.ReadByte()
-		if err != nil {
-			d.err = err
-			return -1, true
-		}
-
-		// Fast whitespace check using bitmask (space, tab, lf, cr, ff, null)
-		if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
-			continue
-		}
-
-		// End of data marker
-		if c == '>' {
-			d.endSeen = true
-			d.err = io.EOF
-			return -1, true
-		}
-
-		// Use lookup table for hex conversion (much faster than multiple if statements)
-		nib := hexTable[c]
-		if nib >= 0 {
-			return nib, false
-		}
-
-		// Invalid character, skip it (be lenient)
-		if DebugOn {
-			fmt.Printf("ASCIIHexDecode: skipping invalid character: %c (%d)\n", c, c)
-		}
-	}
 }
 
 var passwordPad = []byte{

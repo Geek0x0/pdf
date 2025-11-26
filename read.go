@@ -152,10 +152,6 @@ type xref struct {
 	offset   int64
 }
 
-func (r *Reader) errorf(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
-}
-
 func (r *Reader) getCachedObject(ptr objptr) (object, bool) {
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
@@ -1008,15 +1004,18 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 		Search:
 			for {
 				if strm.Kind() != Stream {
-					panic("not a stream")
+					// Tolerate corrupted xref stream reference
+					return Value{}
 				}
 				if strm.Key("Type").Name() != "ObjStm" {
-					panic("not an object stream")
+					// Not an object stream, return empty
+					return Value{}
 				}
 				n := int(strm.Key("N").Int64())
 				first := strm.Key("First").Int64()
 				if first == 0 {
-					panic("missing First")
+					// Missing First entry, return empty
+					return Value{}
 				}
 				b := newBuffer(strm.Reader(), 0)
 				b.allowEOF = true
@@ -1033,8 +1032,11 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 				}
 				ext := strm.Key("Extends")
 				if ext.Kind() != Stream {
-					panic("cannot find object in stream")
+					// Cannot find object in stream, return empty
+					PutPDFBuffer(b)
+					return Value{}
 				}
+				PutPDFBuffer(b)
 				strm = ext
 			}
 		} else {
@@ -1044,11 +1046,13 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 			obj = b.readObject()
 			def, ok := obj.(objdef)
 			if !ok {
-				panic(fmt.Errorf("loading %v: found %T instead of objdef", ptr, obj))
-				//return Value{}
+				// Tolerate corrupted object definition
+				PutPDFBuffer(b)
+				return Value{}
 			}
 			if def.ptr != ptr {
-				panic(fmt.Errorf("loading %v: found %v", ptr, def.ptr))
+				// Object pointer mismatch, tolerate and use what we found
+				// This can happen in corrupted PDFs where xref table is inconsistent
 			}
 			x = def.obj
 			r.storeCachedObject(ptr, x)
@@ -1063,7 +1067,8 @@ func (r *Reader) resolve(parent objptr, x interface{}) Value {
 	case string:
 		return Value{r, parent, x}
 	default:
-		panic(fmt.Errorf("unexpected value type %T in resolve", x))
+		// Unknown type, return empty value instead of panic
+		return Value{}
 	}
 }
 
@@ -1096,14 +1101,21 @@ func (v Value) Reader() io.ReadCloser {
 	param := v.Key("DecodeParms")
 	switch filter.Kind() {
 	default:
-		panic(fmt.Errorf("unsupported filter %v", filter))
+		// Unsupported filter, return error reader
+		return &errorReadCloser{fmt.Errorf("unsupported filter %v", filter)}
 	case Null:
 		// ok
 	case Name:
 		rd = applyFilter(rd, filter.Name(), param)
+		if rd == nil {
+			return &errorReadCloser{fmt.Errorf("failed to apply filter %s", filter.Name())}
+		}
 	case Array:
 		for i := 0; i < filter.Len(); i++ {
 			rd = applyFilter(rd, filter.Index(i).Name(), param.Index(i))
+			if rd == nil {
+				return &errorReadCloser{fmt.Errorf("failed to apply filter at index %d", i)}
+			}
 		}
 	}
 
@@ -1113,17 +1125,20 @@ func (v Value) Reader() io.ReadCloser {
 func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 	switch name {
 	default:
-		panic("unknown filter " + name)
+		// Unknown filter, return nil to signal error
+		return nil
 	case "FlateDecode":
 		zr, err := zlib.NewReader(rd)
 		if err != nil {
-			panic(err)
+			// Failed to create zlib reader, return nil
+			return nil
 		}
 		return applyPredictor(zr, param)
 	case "LZWDecode":
 		early := param.Key("EarlyChange")
 		if early.Kind() != Null && early.Int64() != 1 {
-			panic("LZW EarlyChange != 1 not supported")
+			// Unsupported LZW configuration, return nil
+			return nil
 		}
 		lr := lzw.NewReader(rd, lzw.MSB, 8)
 		return applyPredictor(lr, param)
@@ -1136,7 +1151,8 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 			if DebugOn {
 				fmt.Println("param=", param)
 			}
-			panic("not expected DecodeParms for ascii85")
+			// Unexpected DecodeParms, but continue with decoder
+			return decoder
 		case nil:
 			return decoder
 		}
@@ -1175,7 +1191,8 @@ func applyPredictor(rd io.Reader, param Value) io.Reader {
 		if DebugOn {
 			fmt.Println("unknown predictor", pred)
 		}
-		panic("pred")
+		// Unknown predictor, return original reader
+		return rd
 	}
 }
 
@@ -1439,10 +1456,15 @@ func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
 	if useAES {
 		s := []byte(x)
 		if len(s) < aes.BlockSize {
-			panic("Encrypted text shorter that AES block size")
+			// Encrypted text too short, return original
+			return x
 		}
 
-		block, _ := aes.NewCipher(key)
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			// Failed to create cipher, return original
+			return x
+		}
 		iv := s[:aes.BlockSize]
 		s = s[aes.BlockSize:]
 
@@ -1463,10 +1485,13 @@ func decryptStream(key []byte, useAES bool, ptr objptr, rd io.Reader) io.Reader 
 	if useAES {
 		cb, err := aes.NewCipher(key)
 		if err != nil {
-			panic("AES: " + err.Error())
+			// Failed to create AES cipher, return error reader
+			return &errorReader{err: fmt.Errorf("AES: %s", err.Error())}
 		}
 		iv := make([]byte, 16)
-		io.ReadFull(rd, iv)
+		if _, err := io.ReadFull(rd, iv); err != nil {
+			return &errorReader{err: fmt.Errorf("failed to read AES IV: %s", err.Error())}
+		}
 		cbc := cipher.NewCBCDecrypter(cb, iv)
 		rd = &cbcReader{cbc: cbc, rd: rd, buf: make([]byte, 16)}
 	} else {
@@ -1474,6 +1499,15 @@ func decryptStream(key []byte, useAES bool, ptr objptr, rd io.Reader) io.Reader 
 		rd = &cipher.StreamReader{S: c, R: rd}
 	}
 	return rd
+}
+
+// errorReader is a Reader that always returns an error
+type errorReader struct {
+	err error
+}
+
+func (r *errorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }
 
 type cbcReader struct {

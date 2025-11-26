@@ -248,13 +248,6 @@ func TestReaderAggregateFunctions(t *testing.T) {
 	if len(out.Child) != 2 {
 		t.Fatalf("Outline children = %d", len(out.Child))
 	}
-
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("expected panic from errorf")
-		}
-	}()
-	new(Reader).errorf("boom")
 }
 
 func TestReaderEncryptionPrimitives(t *testing.T) {

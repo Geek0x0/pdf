@@ -161,13 +161,22 @@ func TestReadArrayStopsOnEOF(t *testing.T) {
 		t.Fatalf("expected opening bracket, got %v", tok)
 	}
 
+	// Now we tolerate unterminated arrays, should not panic and return partial result
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected panic for unterminated array")
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
 
-	buf.readArray()
+	result := buf.readArray()
+	arr, ok := result.(array)
+	if !ok {
+		t.Fatalf("expected array, got %T", result)
+	}
+	// Should return the elements that were successfully parsed (1, 2, 3)
+	if len(arr) != 3 {
+		t.Fatalf("expected 3 elements, got %d", len(arr))
+	}
 }
 
 func TestReadArrayTooLarge(t *testing.T) {
@@ -186,13 +195,22 @@ func TestReadArrayTooLarge(t *testing.T) {
 		t.Fatalf("expected opening bracket, got %v", tok)
 	}
 
+	// Now we tolerate oversized arrays by truncating, should not panic
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected panic for oversized array")
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
 		}
 	}()
 
-	buf.readArray()
+	result := buf.readArray()
+	arr, ok := result.(array)
+	if !ok {
+		t.Fatalf("expected array, got %T", result)
+	}
+	// Should truncate at maxArrayElements
+	if len(arr) != maxArrayElements {
+		t.Fatalf("expected %d elements (truncated), got %d", maxArrayElements, len(arr))
+	}
 }
 
 func TestReadDictStreamWithoutNewline(t *testing.T) {
@@ -373,6 +391,54 @@ func TestReadNameWithHashEscape(t *testing.T) {
 				}
 			} else {
 				t.Errorf("expected name token, got %T", result)
+			}
+		})
+	}
+}
+
+func TestReadObjectMissingEndobj(t *testing.T) {
+	// Test that missing endobj doesn't cause panic
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "missing endobj",
+			input: "1 0 obj\n<< /Type /Test >>\n",
+		},
+		{
+			name:  "endobj replaced with other keyword",
+			input: "1 0 obj\n<< /Type /Test >>\nxref",
+		},
+		{
+			name:  "endobj replaced with number",
+			input: "1 0 obj\n<< /Type /Test >>\n123",
+		},
+		{
+			name:  "valid object with endobj",
+			input: "1 0 obj\n<< /Type /Test >>\nendobj",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := newBuffer(strings.NewReader(tc.input), 0)
+			buf.allowEOF = true
+			buf.allowObjptr = true
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+
+			result := buf.readObject()
+			def, ok := result.(objdef)
+			if !ok {
+				t.Fatalf("expected objdef, got %T", result)
+			}
+			if def.ptr.id != 1 || def.ptr.gen != 0 {
+				t.Errorf("expected object 1 0, got %d %d", def.ptr.id, def.ptr.gen)
 			}
 		})
 	}

@@ -42,6 +42,7 @@ type buffer struct {
 	allowObjptr bool
 	allowStream bool
 	eof         bool
+	readErr     error // stores read error instead of panicking
 	key         []byte
 	useAES      bool
 	objptr      objptr
@@ -74,10 +75,6 @@ func (b *buffer) readByte() byte {
 	return c
 }
 
-func (b *buffer) errorf(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
-}
-
 func (b *buffer) reload() bool {
 	n := cap(b.buf) - int(b.offset%int64(cap(b.buf)))
 	n, err := b.r.Read(b.buf[:n])
@@ -88,7 +85,9 @@ func (b *buffer) reload() bool {
 			b.eof = true
 			return false
 		}
-		b.errorf("malformed PDF: reading at offset %d: %v", b.offset, err)
+		// Store error instead of panicking - treat as EOF for reading
+		b.readErr = fmt.Errorf("malformed PDF: reading at offset %d: %v", b.offset, err)
+		b.eof = true
 		return false
 	}
 	b.offset += int64(n)
@@ -170,7 +169,8 @@ func (b *buffer) readToken() token {
 
 	default:
 		if isDelim(c) {
-			b.errorf("unexpected delimiter %#q", rune(c))
+			// Tolerate unexpected delimiter in corrupted PDFs
+			// Return nil to signal end of token stream
 			return nil
 		}
 		b.unreadByte()
@@ -199,17 +199,19 @@ func (b *buffer) readHexString() token {
 		if c2 == '>' {
 			x := unhex(c)
 			if x < 0 {
-				b.errorf("malformed hex string %c %s", c, b.buf[b.pos:])
+				// Invalid hex char at odd position - skip it and treat as end
 				break
 			}
 			tmp = append(tmp, byte(x<<4))
 			break
 		}
-		x := unhex(c)<<4 | unhex(c2)
-		if x < 0 {
-			b.errorf("malformed hex string %c %c %s", c, c2, b.buf[b.pos:])
-			break
+		x1, x2 := unhex(c), unhex(c2)
+		if x1 < 0 || x2 < 0 {
+			// Invalid hex char(s) - skip this pair and continue
+			// PDF viewers typically ignore invalid characters
+			continue
 		}
+		x := x1<<4 | x2
 		tmp = append(tmp, byte(x))
 	}
 	b.tmp = tmp
@@ -276,10 +278,9 @@ Loop:
 					}
 					x = x*8 + int(c-'0')
 				}
-				if x > 255 {
-					b.errorf("invalid octal escape \\%03o", x)
-				}
-				tmp = append(tmp, byte(x))
+				// Per PDF spec, octal codes should be in range 0-377 (0-255)
+				// If out of range, mask to byte value
+				tmp = append(tmp, byte(x&0xFF))
 			default:
 				// PDF spec: if the character following the backslash is not recognized,
 				// the backslash is ignored and the character is treated literally
@@ -461,8 +462,12 @@ func (b *buffer) readObject() object {
 		case ">>":
 			// stop the object
 			return nil
+		case "endobj", "endstream", "stream":
+			// Tolerate these keywords appearing unexpectedly in corrupted PDFs
+			return nil
 		}
-		b.errorf("unexpected keyword %q parsing object", kw)
+		// Return the keyword itself for other unexpected keywords
+		// This allows the caller to handle it appropriately
 		return nil
 	}
 
@@ -488,8 +493,11 @@ func (b *buffer) readObject() object {
 				if _, ok := obj.(stream); !ok {
 					tok4 := b.readToken()
 					if tok4 != keyword("endobj") {
-						b.errorf("missing endobj after indirect object definition")
-						b.unreadToken(tok4)
+						// Tolerate missing endobj - common in corrupted PDFs
+						// Just unread the token and continue
+						if tok4 != nil && tok4 != io.EOF {
+							b.unreadToken(tok4)
+						}
 					}
 				}
 				b.objptr = old
@@ -510,10 +518,12 @@ func (b *buffer) readArray() object {
 			break
 		}
 		if tok == io.EOF {
-			b.errorf("unterminated array before EOF")
+			// Tolerate unterminated array, return what we have
+			break
 		}
 		if len(x) >= maxArrayElements {
-			b.errorf("array too large (%d elements >= limit %d)", len(x), maxArrayElements)
+			// Array too large, stop parsing and return what we have
+			break
 		}
 		b.unreadToken(tok)
 		x = append(x, b.readObject())

@@ -376,16 +376,21 @@ func HilbertXYToIndex(x, y, order uint32) uint64 {
 
 // 9. SIMD-friendly batch operations (pseudocode, actual assembly needed)
 func BatchCompareFloat64(a, b []float64, threshold float64) []bool {
-	if len(a) != len(b) {
-		panic("length mismatch")
+	// Handle length mismatch gracefully - compare up to the shorter length
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	if minLen == 0 {
+		return []bool{}
 	}
 
-	result := make([]bool, len(a))
+	result := make([]bool, minLen)
 
 	// Ideally use AVX2 to process 4 float64 at once
 	// This is scalar version, should actually be implemented in assembly
 	i := 0
-	for ; i+4 <= len(a); i += 4 {
+	for ; i+4 <= minLen; i += 4 {
 		// AVX2: load 4 values at once, compare, store
 		result[i] = math.Abs(a[i]-b[i]) < threshold
 		result[i+1] = math.Abs(a[i+1]-b[i+1]) < threshold
@@ -394,7 +399,7 @@ func BatchCompareFloat64(a, b []float64, threshold float64) []bool {
 	}
 
 	// Process remaining elements
-	for ; i < len(a); i++ {
+	for ; i < minLen; i++ {
 		result[i] = math.Abs(a[i]-b[i]) < threshold
 	}
 

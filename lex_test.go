@@ -252,3 +252,59 @@ func TestReadDictWithNonNameKey(t *testing.T) {
 		t.Fatalf("expected key /A = 1, got %v", d[name("A")])
 	}
 }
+
+func TestReadHexStringOddLength(t *testing.T) {
+	// Per PDF spec, if there's an odd number of hex digits,
+	// the final digit is assumed to be followed by 0.
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "odd hex digits",
+			input:    "<3110D3FB9D508FF7453BB3254E18B10>",
+			expected: "\x31\x10\xD3\xFB\x9D\x50\x8F\xF7\x45\x3B\xB3\x25\x4E\x18\xB1\x00",
+		},
+		{
+			name:     "single hex digit",
+			input:    "<A>",
+			expected: "\xA0",
+		},
+		{
+			name:     "even hex digits",
+			input:    "<48656C6C6F>",
+			expected: "Hello",
+		},
+		{
+			name:     "empty hex string",
+			input:    "<>",
+			expected: "",
+		},
+		{
+			name:     "hex with spaces odd",
+			input:    "<4 8 6 5 6 C 6 C 6 F 0>",
+			expected: "Hello\x00",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := newBuffer(strings.NewReader(tc.input), 0)
+			buf.allowEOF = true
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("unexpected panic: %v", r)
+				}
+			}()
+
+			// Skip the initial '<'
+			buf.readByte()
+			result := buf.readHexString()
+			if result != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}

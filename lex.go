@@ -194,6 +194,17 @@ func (b *buffer) readHexString() token {
 		if isSpace(c2) {
 			goto Loop2
 		}
+		// Per PDF spec, if there's an odd number of hex digits,
+		// the final digit is assumed to be followed by 0.
+		if c2 == '>' {
+			x := unhex(c)
+			if x < 0 {
+				b.errorf("malformed hex string %c %s", c, b.buf[b.pos:])
+				break
+			}
+			tmp = append(tmp, byte(x<<4))
+			break
+		}
 		x := unhex(c)<<4 | unhex(c2)
 		if x < 0 {
 			b.errorf("malformed hex string %c %c %s", c, c2, b.buf[b.pos:])

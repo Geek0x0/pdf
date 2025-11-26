@@ -403,28 +403,83 @@ func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict,
 	}
 	// Enhanced error reporting with buffer position and more context
 	offset := b.readOffset()
-	// Limit the token representation to avoid very long error messages
-	tokStr := fmt.Sprintf("%T", tok)
-	if len(fmt.Sprintf("%v", tok)) > 100 {
-		tokStr += " (value too long to display)"
-	} else {
-		tokStr += fmt.Sprintf(": %v", tok)
-	}
-	err = fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found %s", offset, tokStr)
+	// Check for common corruption patterns
+	err = diagnoseXrefCorruption(tok, offset)
 	return
+}
+
+// diagnoseXrefCorruption analyzes what was found instead of xref table and provides specific diagnosis
+func diagnoseXrefCorruption(tok token, offset int64) error {
+	tokStr := fmt.Sprintf("%T", tok)
+
+	// Check for the specific corruption pattern seen in multiple files
+	if dict, ok := tok.(dict); ok {
+		if dict["Filter"] != nil && dict["DecodeParms"] != nil {
+			// Check for the specific corruption pattern seen in multiple files
+			if filter := dict["Filter"]; filter == name("FlateDecode") {
+				if decodeParms := dict["DecodeParms"]; decodeParms != nil {
+					return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found stream object header instead (FlateDecode stream with compression parameters) - this appears to be a systematic PDF generation or transmission error affecting multiple files", offset)
+				}
+			}
+			return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found stream object header instead (Filter: %v, DecodeParms present) - PDF structure severely corrupted", offset, dict["Filter"])
+		}
+		if len(dict) > 0 {
+			return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found dictionary object instead - possible xref table corruption", offset)
+		}
+	}
+
+	// Check if we found an object definition
+	if objdef, ok := tok.(objdef); ok {
+		// Check if this object definition contains xref stream metadata
+		if strm, ok := objdef.obj.(stream); ok {
+			if strm.hdr["Type"] == name("XRef") {
+				return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found xref stream object definition instead - startxref offset incorrect, should point to xref stream start, not object definition", offset)
+			}
+			// Check for systematic corruption: stream object with FlateDecode at xref position
+			if strm.hdr["Filter"] == name("FlateDecode") && strm.hdr["DecodeParms"] != nil {
+				return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found FlateDecode stream object definition instead - this matches systematic PDF corruption pattern seen in multiple files (object %d)", offset, objdef.ptr.id)
+			}
+		}
+		return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found object definition instead - xref offset points to wrong location", offset)
+	}
+
+	// Check for malformed object definition strings (systematic corruption pattern)
+	if str, ok := tok.(string); ok {
+		if strings.Contains(str, "obj") && strings.Contains(str, "/Filter") && strings.Contains(str, "/FlateDecode") {
+			return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found malformed object definition string with FlateDecode filter - this matches systematic PDF corruption pattern seen in multiple files", offset)
+		}
+	}
+
+	// Generic case with length limit
+	valStr := fmt.Sprintf("%v", tok)
+	if len(valStr) > 100 {
+		valStr = valStr[:100] + "... (truncated)"
+	}
+	tokStr += ": " + valStr
+	return fmt.Errorf("malformed PDF: cross-reference table not found at offset %d, found %s", offset, tokStr)
 }
 
 func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 	obj1 := b.readObject()
 	obj, ok := obj1.(objdef)
 	if !ok {
+		// Enhanced error for xref stream corruption
+		if dict, ok := obj1.(dict); ok && dict["Filter"] != nil {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: expected xref stream but found stream object header (Filter: %v) - PDF structure corrupted", dict["Filter"])
+		}
+		// Check for systematic corruption: malformed object definition strings at xref stream position
+		if str, ok := obj1.(string); ok {
+			if strings.Contains(str, "obj") && strings.Contains(str, "/Filter") && strings.Contains(str, "/FlateDecode") {
+				return nil, objptr{}, nil, fmt.Errorf("malformed PDF: expected xref stream but found malformed object definition string with FlateDecode filter - this matches systematic PDF corruption pattern seen in multiple files")
+			}
+		}
 		// Limit error message length for large objects
 		objStr := fmt.Sprintf("%T", obj1)
-		if len(fmt.Sprintf("%v", obj1)) > 100 {
-			objStr += " (value too long to display)"
-		} else {
-			objStr += fmt.Sprintf(": %v", obj1)
+		valStr := fmt.Sprintf("%v", obj1)
+		if len(valStr) > 100 {
+			valStr = valStr[:100] + "... (truncated)"
 		}
+		objStr += ": " + valStr
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: cross-reference table not found: %s", objStr)
 	}
 	strmptr := obj.ptr
@@ -634,12 +689,14 @@ func (r *Reader) rebuildXrefTable() error {
 	}
 	entries := make(map[uint32]xref)
 	search := 0
+	objCount := 0
 	for {
 		idx := bytes.Index(data[search:], []byte(" obj"))
 		if idx < 0 {
 			break
 		}
 		pos := search + idx
+		objCount++
 		lineStart := pos
 		for lineStart > 0 && data[lineStart-1] != '\n' && data[lineStart-1] != '\r' {
 			lineStart--
@@ -658,7 +715,7 @@ func (r *Reader) rebuildXrefTable() error {
 		search = pos + len(" obj")
 	}
 	if len(entries) == 0 {
-		return errors.New("pdf: unable to rebuild xref")
+		return fmt.Errorf("pdf: unable to rebuild xref - found %d ' obj' occurrences but no valid objects in %d bytes", objCount, len(data))
 	}
 	var maxID uint32
 	for id := range entries {
@@ -680,18 +737,18 @@ func (r *Reader) rebuildXrefTable() error {
 func (r *Reader) recoverTrailer(data []byte) error {
 	idx := bytes.LastIndex(data, []byte("trailer"))
 	if idx < 0 {
-		return errors.New("trailer not found")
+		return fmt.Errorf("trailer not found in %d bytes of PDF data", len(data))
 	}
 	buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
 	defer PutPDFBuffer(buf)
 	buf.allowEOF = true
 	if tok := buf.readToken(); tok != keyword("trailer") {
-		return errors.New("malformed recovered trailer")
+		return fmt.Errorf("malformed recovered trailer at offset %d: expected 'trailer', got %T: %v", idx, tok, tok)
 	}
 	obj := buf.readObject()
 	d, ok := obj.(dict)
 	if !ok {
-		return errors.New("recovered trailer is not dict")
+		return fmt.Errorf("recovered trailer at offset %d is not a dictionary, got %T", idx, obj)
 	}
 	r.trailer = d
 	r.trailerptr = objptr{}

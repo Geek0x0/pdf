@@ -34,7 +34,7 @@ func BenchmarkReadHexString(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				buf := newBuffer(strings.NewReader(hexString), 0)
 				buf.readByte() // consume '<'
-				tok := buf.readHexString()
+				tok := buf.readHexStringSIMDAdvanced()
 				if tok == nil {
 					b.Fatal("unexpected nil token")
 				}
@@ -75,7 +75,7 @@ func BenchmarkReadHexStringWithSpaces(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				buf := newBuffer(strings.NewReader(hexString), 0)
 				buf.readByte() // consume '<'
-				tok := buf.readHexString()
+				tok := buf.readHexStringSIMDAdvanced()
 				if tok == nil {
 					b.Fatal("unexpected nil token")
 				}

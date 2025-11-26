@@ -150,7 +150,7 @@ func TestReadHexStringWithContext(t *testing.T) {
 			b := newBuffer(strings.NewReader(tt.input), 0)
 			b.readByte() // consume '<'
 
-			tok := b.readHexString()
+			tok := b.readHexStringSIMDAdvanced()
 			result, ok := tok.(string)
 			if !ok {
 				t.Fatalf("expected string token, got %T", tok)
@@ -175,7 +175,7 @@ func TestReadHexStringWithLimit(t *testing.T) {
 	b.limits = limits
 	b.readByte() // consume '<'
 
-	tok := b.readHexString()
+	tok := b.readHexStringSIMDAdvanced()
 	result, ok := tok.(string)
 	if !ok {
 		t.Fatalf("expected string token, got %T", tok)
@@ -200,7 +200,7 @@ func TestReadHexStringCancellation(t *testing.T) {
 	b.ctxChecker = cc
 	b.readByte() // consume '<'
 
-	tok := b.readHexString()
+	tok := b.readHexStringSIMDAdvanced()
 
 	// Should return nil on cancellation
 	// With batch reading optimization, the first buffer load may complete

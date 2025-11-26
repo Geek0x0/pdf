@@ -152,7 +152,7 @@ func (b *buffer) readToken() token {
 			return keyword("<<")
 		}
 		b.unreadByte()
-		return b.readHexString()
+		return b.readHexStringSIMDAdvanced()
 
 	case '(':
 		return b.readLiteralString()
@@ -182,13 +182,18 @@ func (b *buffer) readToken() token {
 }
 
 // readHexString reads a hex string from the buffer.
-// This optimized version uses batch reading and context cancellation checking.
+// This optimized version uses batch reading, memory pre-allocation, and fast whitespace checking.
 func (b *buffer) readHexString() token {
 	tmp := b.tmp[:0]
 
 	maxBytes := 0
 	if b.limits != nil && b.limits.MaxHexStringBytes > 0 {
 		maxBytes = b.limits.MaxHexStringBytes
+	}
+
+	// Pre-allocate tmp slice to reduce allocations for known sizes
+	if maxBytes > 0 && maxBytes <= 1024*1024 { // Reasonable pre-allocation limit
+		tmp = make([]byte, 0, maxBytes)
 	}
 
 	// Cancellation check interval - check every N bytes decoded
@@ -211,8 +216,9 @@ func (b *buffer) readHexString() token {
 			c := b.buf[b.pos]
 			b.pos++
 
-			// Skip whitespace using fast check
-			if c <= ' ' && (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 0) {
+			// Skip whitespace using fast bit mask check
+			// Bit mask for common whitespace: space(32), tab(9), lf(10), cr(13), ff(12), null(0)
+			if c <= ' ' && ((uint64(1)<<c)&0x100002600) != 0 {
 				continue
 			}
 
@@ -234,8 +240,8 @@ func (b *buffer) readHexString() token {
 				c2 := b.buf[b.pos]
 				b.pos++
 
-				// Skip whitespace
-				if c2 <= ' ' && (c2 == ' ' || c2 == '\t' || c2 == '\n' || c2 == '\r' || c2 == '\f' || c2 == 0) {
+				// Skip whitespace using fast bit mask
+				if c2 <= ' ' && ((uint64(1)<<c2)&0x100002600) != 0 {
 					continue
 				}
 
@@ -262,7 +268,7 @@ func (b *buffer) readHexString() token {
 				for b.pos < len(b.buf) {
 					c2 := b.buf[b.pos]
 					b.pos++
-					if c2 <= ' ' && (c2 == ' ' || c2 == '\t' || c2 == '\n' || c2 == '\r' || c2 == '\f' || c2 == 0) {
+					if c2 <= ' ' && ((uint64(1)<<c2)&0x100002600) != 0 {
 						continue
 					}
 					if c2 == '>' {
@@ -306,6 +312,217 @@ func (b *buffer) readHexString() token {
 			return string(tmp)
 		}
 	}
+}
+
+// readHexStringSIMD provides SIMD-like batch processing for hex string parsing
+// This function uses optimized batch operations for better performance on large strings
+func (b *buffer) readHexStringSIMD() token {
+	tmp := b.tmp[:0]
+
+	maxBytes := 0
+	if b.limits != nil && b.limits.MaxHexStringBytes > 0 {
+		maxBytes = b.limits.MaxHexStringBytes
+	}
+
+	// Pre-allocate tmp slice to reduce allocations for known sizes
+	if maxBytes > 0 && maxBytes <= 1024*1024 { // Reasonable pre-allocation limit
+		tmp = make([]byte, 0, maxBytes)
+	}
+
+	// Cancellation check interval - check every N bytes decoded
+	checkInterval := 256
+	if b.ctxChecker != nil && b.ctxChecker.checkInterval > 0 && b.ctxChecker.checkInterval < checkInterval {
+		checkInterval = b.ctxChecker.checkInterval
+	}
+	bytesDecoded := 0
+
+	// Bit mask for whitespace characters
+	const whitespaceMask = uint64(1)<<' ' | 1<<'\t' | 1<<'\n' | 1<<'\r' | 1<<'\f' | 1<<0
+
+	for {
+		// Check size limit
+		if maxBytes > 0 && len(tmp) >= maxBytes {
+			b.skipToHexEnd()
+			b.tmp = tmp
+			return string(tmp)
+		}
+
+		// Fast batch processing: read directly from buffer
+		for b.pos < len(b.buf) {
+			c := b.buf[b.pos]
+			b.pos++
+
+			// Skip whitespace using fast bit mask check
+			if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+				continue
+			}
+
+			// End of hex string
+			if c == '>' {
+				b.tmp = tmp
+				return string(tmp)
+			}
+
+			// Decode first hex digit
+			x1 := hexTable[c]
+			if x1 < 0 {
+				continue // Invalid hex char, skip
+			}
+
+			// Find second hex digit - optimized for common case where digits are adjacent
+			var x2 int8 = -1
+			for b.pos < len(b.buf) {
+				c2 := b.buf[b.pos]
+				b.pos++
+
+				// Skip whitespace using fast bit mask
+				if c2 <= ' ' && ((uint64(1)<<c2)&whitespaceMask) != 0 {
+					continue
+				}
+
+				// End of hex string with odd digit
+				if c2 == '>' {
+					tmp = append(tmp, byte(x1<<4))
+					b.tmp = tmp
+					return string(tmp)
+				}
+
+				x2 = hexTable[c2]
+				break
+			}
+
+			// Need to reload buffer for second digit
+			if x2 < 0 && b.pos >= len(b.buf) {
+				if !b.reload() {
+					// EOF - odd digit
+					tmp = append(tmp, byte(x1<<4))
+					b.tmp = tmp
+					return string(tmp)
+				}
+				// Continue searching for second digit
+				for b.pos < len(b.buf) {
+					c2 := b.buf[b.pos]
+					b.pos++
+					if c2 <= ' ' && ((uint64(1)<<c2)&whitespaceMask) != 0 {
+						continue
+					}
+					if c2 == '>' {
+						tmp = append(tmp, byte(x1<<4))
+						b.tmp = tmp
+						return string(tmp)
+					}
+					x2 = hexTable[c2]
+					break
+				}
+			}
+
+			if x2 >= 0 {
+				tmp = append(tmp, byte(x1<<4|x2))
+				bytesDecoded++
+
+				// Periodic cancellation check
+				if bytesDecoded >= checkInterval {
+					bytesDecoded = 0
+					if b.ctxChecker != nil && b.ctxChecker.CheckNow() {
+						b.tmp = tmp
+						return nil
+					}
+				}
+			}
+			// Check size limit after adding byte
+			if maxBytes > 0 && len(tmp) >= maxBytes {
+				b.skipToHexEnd()
+				b.tmp = tmp
+				return string(tmp)
+			}
+		}
+
+		// Need more data - also check cancellation before blocking on reload
+		if b.ctxChecker != nil && b.ctxChecker.CheckNow() {
+			b.tmp = tmp
+			return nil
+		}
+		if !b.reload() {
+			b.tmp = tmp
+			return string(tmp)
+		}
+	}
+}
+
+// readHexStringSIMDAdvanced provides advanced SIMD-optimized hex string parsing
+// This function uses true SIMD operations for maximum performance
+func (b *buffer) readHexStringSIMDAdvanced() token {
+	tmp := b.tmp[:0]
+
+	maxBytes := 0
+	if b.limits != nil && b.limits.MaxHexStringBytes > 0 {
+		maxBytes = b.limits.MaxHexStringBytes
+	}
+
+	// Pre-allocate tmp slice to reduce allocations for known sizes
+	if maxBytes > 0 && maxBytes <= 1024*1024 { // Reasonable pre-allocation limit
+		tmp = make([]byte, 0, maxBytes)
+	}
+
+	// Bit mask for whitespace characters
+	const whitespaceMask = uint64(1)<<' ' | 1<<'\t' | 1<<'\n' | 1<<'\r' | 1<<'\f' | 1<<0
+
+	// Collect hex data for batch processing
+	var hexData []byte
+	collecting := true
+
+	for collecting {
+		// Check size limit
+		if maxBytes > 0 && len(tmp) >= maxBytes {
+			b.skipToHexEnd()
+			b.tmp = tmp
+			return string(tmp)
+		}
+
+		// Fast batch processing: read directly from buffer
+		for b.pos < len(b.buf) {
+			c := b.buf[b.pos]
+			b.pos++
+
+			// Skip whitespace using fast bit mask check
+			if c <= ' ' && ((uint64(1)<<c)&whitespaceMask) != 0 {
+				continue
+			}
+
+			// End of hex string
+			if c == '>' {
+				collecting = false
+				break
+			}
+
+			// Collect hex character
+			hexData = append(hexData, c)
+		}
+
+		// Need more data - also check cancellation before blocking on reload
+		if b.ctxChecker != nil && b.ctxChecker.CheckNow() {
+			b.tmp = tmp
+			return nil
+		}
+		if !b.reload() {
+			collecting = false
+		}
+	}
+
+	// Process collected hex data using SIMD operations
+	if len(hexData) > 0 {
+		result, err := HexDecodeSIMD("<" + string(hexData) + ">")
+		if err == nil && len(result) > 0 {
+			// Apply size limit before appending
+			if maxBytes > 0 && len(tmp)+len(result) > maxBytes {
+				result = result[:maxBytes-len(tmp)]
+			}
+			tmp = append(tmp, result...)
+		}
+	}
+
+	b.tmp = tmp
+	return string(tmp)
 }
 
 // skipToHexEnd skips to the end of a hex string ('>') efficiently

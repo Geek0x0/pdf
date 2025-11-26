@@ -319,7 +319,7 @@ func TestReadHexStringOddLength(t *testing.T) {
 
 			// Skip the initial '<'
 			buf.readByte()
-			result := buf.readHexString()
+			result := buf.readHexStringSIMDAdvanced()
 			if result != tc.expected {
 				t.Errorf("expected %q, got %q", tc.expected, result)
 			}

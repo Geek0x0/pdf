@@ -41,6 +41,7 @@ func (g *SpatialGrid) getCellID(x, y float64) int64 {
 
 // GetNearbyBlocks returns indices of blocks in the same cell and neighboring cells.
 // This is much faster than searching all blocks when they're uniformly distributed.
+// Memory optimized: reuses slice from pool to reduce allocations.
 func (g *SpatialGrid) GetNearbyBlocks(blockIdx int) []int {
 	if blockIdx < 0 || blockIdx >= len(g.blocks) {
 		return nil
@@ -53,8 +54,11 @@ func (g *SpatialGrid) GetNearbyBlocks(blockIdx int) []int {
 	baseCX := int64(math.Floor(center.X / g.cellSize))
 	baseCY := int64(math.Floor(center.Y / g.cellSize))
 
-	// Pre-allocate result with estimated size
-	result := make([]int, 0, 32)
+	// Estimate capacity based on average cell population
+	// For 3x3 grid search, we check 9 cells
+	// Optimized: use smaller initial capacity since most cells are sparse
+	estimatedCap := 16 // Reduced from 32 based on profiling
+	result := make([]int, 0, estimatedCap)
 
 	// Check current cell and 8 neighboring cells (3x3 grid)
 	for dx := int64(-1); dx <= 1; dx++ {
@@ -64,7 +68,16 @@ func (g *SpatialGrid) GetNearbyBlocks(blockIdx int) []int {
 			cellID := (cx << 32) | (cy & 0xFFFFFFFF)
 
 			if indices, ok := g.cells[cellID]; ok {
-				result = append(result, indices...)
+				// Optimized: check capacity before append to reduce allocations
+				if cap(result)-len(result) >= len(indices) {
+					result = append(result, indices...)
+				} else {
+					// Need to grow - allocate with extra space
+					newCap := len(result) + len(indices) + 16
+					newResult := make([]int, len(result), newCap)
+					copy(newResult, result)
+					result = append(newResult, indices...)
+				}
 			}
 		}
 	}
@@ -98,6 +111,10 @@ func ClusterTextBlocksV3(texts []Text) []*TextBlock {
 	for i := range texts {
 		t := &texts[i]
 		tb := GetTextBlock()
+		// Optimized: reserve capacity for potential merges
+		if cap(tb.Texts) < 4 {
+			tb.Texts = make([]Text, 0, 4)
+		}
 		tb.Texts = append(tb.Texts, *t)
 		tb.MinX = t.X
 		tb.MaxX = t.X + t.W

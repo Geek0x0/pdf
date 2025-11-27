@@ -622,9 +622,15 @@ func buildPlainTextOptimized(texts []Text) string {
 		return ""
 	}
 
-	// Use pooled string builder for better memory reuse
-	builder := GetSizedStringBuilder(0)
-	defer PutSizedStringBuilder(builder, 0)
+	// CRITICAL FIX: Use direct allocation to avoid pool concurrency issues
+	// Estimate size: avg 20 chars per text + 1 space/newline
+	estimatedSize := len(texts) * 21
+	if estimatedSize < 256 {
+		estimatedSize = 256
+	} else if estimatedSize > 65536 {
+		estimatedSize = 65536
+	}
+	builder := NewFastStringBuilder(estimatedSize)
 
 	const lineTolerance = 3.0
 	var prevY float64

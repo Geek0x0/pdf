@@ -151,9 +151,8 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 			totalLen += len(text)
 		}
 
-		// Use builder from object pool
-		builder := GetSizedStringBuilder(totalLen + len(pageTexts))
-		defer PutSizedStringBuilder(builder, totalLen+len(pageTexts))
+		// Use direct allocation in concurrent scenario to avoid pool issues
+		builder := NewFastStringBuilder(totalLen + len(pageTexts))
 
 		for _, text := range pageTexts {
 			builder.WriteString(text)
@@ -303,9 +302,8 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 			totalLen += len(text)
 		}
 
-		// Use builder from object pool
-		builder := GetSizedStringBuilder(totalLen)
-		defer PutSizedStringBuilder(builder, totalLen)
+		// Use direct allocation in concurrent scenario
+		builder := NewFastStringBuilder(totalLen)
 
 		for _, pageNum := range pageList {
 			builder.WriteString(pageTexts[pageNum])

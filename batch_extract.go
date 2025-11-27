@@ -349,8 +349,8 @@ func (r *Reader) ExtractPagesBatchToString(opts BatchExtractOptions) (string, er
 	}
 	totalSize += len(results) - 1 // newlines
 
-	builder := GetSizedStringBuilder(totalSize)
-	defer PutSizedStringBuilder(builder, totalSize)
+	// Use direct allocation in concurrent scenario to avoid pool issues
+	builder := NewFastStringBuilder(totalSize)
 
 	for i, r := range results {
 		builder.WriteString(r.text)

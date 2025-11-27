@@ -1619,12 +1619,16 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 	oldLen := len(ce.text)
 	newLen := oldLen + decodedLen
 
-	// Ensure capacity with growth strategy to reduce future allocations
+	// Optimized growth strategy: more conservative capacity increase
 	if cap(ce.text) < newLen {
-		// Growth strategy: add extra capacity (50% of needed or min 128)
-		extraCap := decodedLen / 2
-		if extraCap < 128 {
-			extraCap = 128
+		// Use 25% growth for large slices, 50% for smaller ones
+		// This reduces memory waste while maintaining efficiency
+		extraCap := decodedLen / 4
+		if oldLen < 1000 {
+			extraCap = decodedLen / 2
+		}
+		if extraCap < 64 {
+			extraCap = 64
 		}
 		newCap := newLen + extraCap
 		newText := make([]Text, oldLen, newCap)

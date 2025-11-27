@@ -251,19 +251,30 @@ func GetSizedStringBuilder(estimatedSize int) *FastStringBuilder {
 
 	switch {
 	case estimatedSize < 1024:
-		sb = globalStringBuilderPool.small.Get().(*FastStringBuilder)
+		if obj := globalStringBuilderPool.small.Get(); obj != nil {
+			sb, _ = obj.(*FastStringBuilder)
+		}
 	case estimatedSize < 16384:
-		sb = globalStringBuilderPool.medium.Get().(*FastStringBuilder)
+		if obj := globalStringBuilderPool.medium.Get(); obj != nil {
+			sb, _ = obj.(*FastStringBuilder)
+		}
 	default:
-		sb = globalStringBuilderPool.large.Get().(*FastStringBuilder)
+		if obj := globalStringBuilderPool.large.Get(); obj != nil {
+			sb, _ = obj.(*FastStringBuilder)
+		}
 	}
 
 	// Defensive check: ensure builder is valid
-	if sb == nil {
-		// Pool returned nil, create new builder
+	if sb == nil || sb.buf == nil {
+		// Pool returned nil or invalid builder, create new one
 		sb = NewFastStringBuilder(estimatedSize)
 	} else {
-		sb.Reset()
+		// Safe reset: ensure buf is valid before resetting
+		if sb.buf != nil {
+			sb.buf = sb.buf[:0]
+		} else {
+			sb.buf = make([]byte, 0, 512)
+		}
 	}
 	return sb
 }

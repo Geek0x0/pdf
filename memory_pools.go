@@ -15,7 +15,9 @@ import (
 var textBlockPool = sync.Pool{
 	New: func() interface{} {
 		return &TextBlock{
-			Texts: make([]Text, 0, 16),
+			// Optimized: smaller initial capacity to reduce memory waste
+			// Most blocks start with 1 text and grow organically
+			Texts: make([]Text, 0, 4), // Reduced from 16
 		}
 	},
 }

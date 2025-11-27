@@ -199,11 +199,10 @@ func (e *Extractor) extractPlainText(pages []int) (string, error) {
 
 // extractPlainTextSequential extracts text sequentially
 func (e *Extractor) extractPlainTextSequential(pages []int) (string, error) {
-	// Use zero-copy StringBuffer for performance optimization
+	// Use direct allocation - avoid pool in potentially concurrent scenarios
 	// Estimated capacity: average 2KB per page
 	estimatedSize := len(pages) * 2048
-	builder := GetSizedStringBuilder(estimatedSize)
-	defer PutSizedStringBuilder(builder, estimatedSize)
+	builder := NewFastStringBuilder(estimatedSize)
 
 	for i, pageNum := range pages {
 		select {

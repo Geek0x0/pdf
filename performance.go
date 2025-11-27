@@ -185,21 +185,29 @@ func (b *FastStringBuilder) WriteString(s string) {
 		b.buf = make([]byte, 0, 512)
 	}
 	b.buf = append(b.buf, s...)
-}
-
-// WriteByte appends a byte
+} // WriteByte appends a byte
 func (b *FastStringBuilder) WriteByte(c byte) error {
+	if b == nil {
+		return nil
+	}
+	if b.buf == nil {
+		b.buf = make([]byte, 0, 512)
+	}
 	b.buf = append(b.buf, c)
 	return nil
-}
-
-// String returns the accumulated string
+} // String returns the accumulated string
 func (b *FastStringBuilder) String() string {
+	if b == nil || b.buf == nil {
+		return ""
+	}
 	return string(b.buf)
 }
 
 // Len returns the current length
 func (b *FastStringBuilder) Len() int {
+	if b == nil || b.buf == nil {
+		return 0
+	}
 	return len(b.buf)
 }
 
@@ -208,11 +216,12 @@ func (b *FastStringBuilder) Reset() {
 	if b == nil {
 		return
 	}
+	// Always ensure buf is non-nil after reset
 	if b.buf == nil {
 		b.buf = make([]byte, 0, 512)
-		return
+	} else {
+		b.buf = b.buf[:0]
 	}
-	b.buf = b.buf[:0]
 }
 
 // LazyPage provides lazy loading of page content to reduce memory usage

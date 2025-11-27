@@ -501,17 +501,6 @@ func TestPutBlockSlice(t *testing.T) {
 	PutBlockSlice(slice) // Just test that it doesn't panic
 }
 
-func TestGetTextSlice(t *testing.T) {
-	slice := GetTextSlice()
-	if slice == nil {
-		t.Error("Expected non-nil slice")
-	}
-}
-
-func TestPutTextSlice(t *testing.T) {
-	slice := make([]Text, 5)
-	PutTextSlice(slice) // Just test that it doesn't panic
-}
 
 func TestGetByteBuffer(t *testing.T) {
 	bufPtr := GetByteBuffer()

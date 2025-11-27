@@ -103,24 +103,6 @@ func PutBlockSlice(s []ClassifiedBlock) {
 }
 
 // Pool for Text slices (used in text extraction)
-var textSlicePool = sync.Pool{
-	New: func() interface{} {
-		s := make([]Text, 0, 32)
-		return &s
-	},
-}
-
-// GetTextSlice retrieves a Text slice from the pool
-func GetTextSlice() []Text {
-	return *textSlicePool.Get().(*[]Text)
-}
-
-// PutTextSlice returns a Text slice to the pool
-func PutTextSlice(s []Text) {
-	s = s[:0]
-	textSlicePool.Put(&s)
-}
-
 // Pool for byte buffers (used in various operations)
 var byteBufferPool = sync.Pool{
 	New: func() interface{} {

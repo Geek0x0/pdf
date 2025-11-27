@@ -1613,7 +1613,7 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 		Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
 		bold, italic, underline := parseFontStyles(f)
 		// Reduce memory allocation of string(ch), directly use decoded string
-		ce.text = append(ce.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], string(ch), vertical, bold, italic, underline})
+		ce.text = append(ce.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], InternRune(ch), vertical, bold, italic, underline})
 
 		tx := w0/1000*g.Tfs + g.Tc
 		tx *= g.Th

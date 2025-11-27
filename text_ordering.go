@@ -59,10 +59,10 @@ func smartTextOrdering(texts []Text) []Text {
 	orderedBlocks := detectReadingOrder(blocks)
 
 	// 3. Flatten blocks back to texts
-	var result []Text
+	result := make([]Text, 0, len(texts))
 	for _, block := range orderedBlocks {
 		// Sort within each block
-		sortedTexts := sortWithinBlock(block.Texts)
+		sortedTexts := sortWithinBlockOptimized(block.Texts)
 		result = append(result, sortedTexts...)
 	}
 
@@ -83,7 +83,7 @@ func clusterTextBlocks(texts []Text) []*TextBlock {
 	}
 
 	// For large datasets, use optimized KD-Tree method
-	return ClusterTextBlocksOptimized(texts)
+	return ClusterTextBlocksOptimizedV2(texts)
 }
 
 // clusterTextBlocksSimple Simple clustering method (for small datasets)
@@ -704,4 +704,45 @@ func detectFootnotes(blocks []*TextBlock, pageHeight float64) []*TextBlock {
 	}
 
 	return footnotes
+}
+// sortWithinBlockOptimized is an optimized version that reduces allocations
+func sortWithinBlockOptimized(texts []Text) []Text {
+if len(texts) == 0 {
+return texts
+}
+
+const lineTolerance = 3.0
+
+// Sort by Y first (top to bottom), then X (left to right)
+sort.Slice(texts, func(i, j int) bool {
+deltaY := texts[i].Y - texts[j].Y
+if deltaY > lineTolerance || deltaY < -lineTolerance {
+return texts[i].Y > texts[j].Y
+}
+return texts[i].X < texts[j].X
+})
+
+// Process in-place without creating line structures
+// Find line boundaries and sort within each line
+n := len(texts)
+lineStart := 0
+
+for i := 1; i <= n; i++ {
+// Check if this is end of a line (or end of texts)
+isLineEnd := i == n || math.Abs(texts[i].Y-texts[lineStart].Y) > lineTolerance
+
+if isLineEnd && i > lineStart+1 {
+// Sort this line segment by X
+lineTexts := texts[lineStart:i]
+sort.Slice(lineTexts, func(a, b int) bool {
+return lineTexts[a].X < lineTexts[b].X
+})
+}
+
+if isLineEnd && i < n {
+lineStart = i
+}
+}
+
+return texts
 }

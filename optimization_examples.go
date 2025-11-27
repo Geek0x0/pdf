@@ -772,3 +772,158 @@ func (pm *PerformanceMetrics) GetMetrics() map[string]interface{} {
 
 // Global performance metrics instance
 var GlobalMetrics = &PerformanceMetrics{}
+// ClusterTextBlocksOptimizedV2 uses object pools to reduce GC pressure
+func ClusterTextBlocksOptimizedV2(texts []Text) []*TextBlock {
+if len(texts) == 0 {
+return nil
+}
+
+// Calculate average font size as distance threshold
+var totalFontSize float64
+for i := range texts {
+totalFontSize += texts[i].FontSize
+}
+avgFontSize := totalFontSize / float64(len(texts))
+distThreshold := avgFontSize * 2.0
+distThresholdSq := distThreshold * distThreshold
+
+// Initialize: each text as independent block using object pool
+blocks := make([]*TextBlock, len(texts))
+for i := range texts {
+t := &texts[i]
+tb := GetTextBlock()
+tb.Texts = append(tb.Texts, *t)
+tb.MinX = t.X
+tb.MaxX = t.X + t.W
+tb.MinY = t.Y
+tb.MaxY = t.Y + t.FontSize
+tb.AvgFontSize = t.FontSize
+blocks[i] = tb
+}
+
+// Build KD tree
+kdtree := BuildKDTree(blocks)
+
+// Use union-find for clustering - use pooled slice
+parent := GetIntSlice(len(blocks))
+for i := range parent {
+parent[i] = i
+}
+
+// Non-recursive find with path compression
+find := func(x int) int {
+root := x
+for parent[root] != root {
+root = parent[root]
+}
+for parent[x] != root {
+next := parent[x]
+parent[x] = root
+x = next
+}
+return root
+}
+
+union := func(x, y int) {
+px, py := find(x), find(y)
+if px != py {
+parent[px] = py
+}
+}
+
+// Create block to index mapping
+blockToIdx := make(map[*TextBlock]int, len(blocks))
+for i, block := range blocks {
+blockToIdx[block] = i
+}
+
+// Find neighbors and merge
+for i, block := range blocks {
+center := block.Center()
+neighbors := kdtree.RangeSearch(center.X, center.Y, distThresholdSq)
+
+for _, neighbor := range neighbors {
+if j, ok := blockToIdx[neighbor]; ok && i != j {
+if shouldMergeClusters(block, neighbor, distThreshold) {
+union(i, j)
+}
+}
+}
+putResultSlice(neighbors)
+}
+
+// Collect clustering results
+clusterMap := make(map[int][]*TextBlock, len(blocks)/4+1)
+for i, block := range blocks {
+root := find(i)
+clusterMap[root] = append(clusterMap[root], block)
+}
+
+// Merge text blocks in each cluster
+result := make([]*TextBlock, 0, len(clusterMap))
+for _, cluster := range clusterMap {
+merged := mergeTextBlocksOptimized(cluster)
+result = append(result, merged)
+}
+
+// Return parent slice to pool
+PutIntSlice(parent)
+
+return result
+}
+
+// mergeTextBlocksOptimized merges blocks with better memory efficiency
+func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
+if len(blocks) == 0 {
+return nil
+}
+if len(blocks) == 1 {
+return blocks[0]
+}
+
+// Calculate total text count
+totalTexts := 0
+for _, block := range blocks {
+totalTexts += len(block.Texts)
+}
+
+// Reuse first block as merged result
+merged := blocks[0]
+if cap(merged.Texts) < totalTexts {
+merged.Texts = make([]Text, 0, totalTexts)
+}
+
+totalFontSize := 0.0
+for _, block := range blocks {
+if block == merged && len(merged.Texts) > 0 {
+// Already have first block's texts
+totalFontSize += block.AvgFontSize * float64(len(block.Texts))
+continue
+}
+merged.Texts = append(merged.Texts, block.Texts...)
+if block.MinX < merged.MinX {
+merged.MinX = block.MinX
+}
+if block.MaxX > merged.MaxX {
+merged.MaxX = block.MaxX
+}
+if block.MinY < merged.MinY {
+merged.MinY = block.MinY
+}
+if block.MaxY > merged.MaxY {
+merged.MaxY = block.MaxY
+}
+totalFontSize += block.AvgFontSize * float64(len(block.Texts))
+
+// Return non-first blocks to pool
+if block != merged {
+PutTextBlock(block)
+}
+}
+
+if totalTexts > 0 {
+merged.AvgFontSize = totalFontSize / float64(totalTexts)
+}
+
+return merged
+}

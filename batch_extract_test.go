@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"sort"
 	"testing"
 )
 
@@ -105,7 +106,10 @@ func TestSortPageResults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sortPageResults(tt.input)
+			// Use standard library sort (matching the optimized implementation)
+			sort.Slice(tt.input, func(i, j int) bool {
+				return tt.input[i].pageNum < tt.input[j].pageNum
+			})
 
 			if len(tt.input) != len(tt.expected) {
 				t.Fatalf("Length mismatch: got %d, want %d", len(tt.input), len(tt.expected))
@@ -294,7 +298,10 @@ func BenchmarkSortPageResults(b *testing.B) {
 				// Make a copy to sort
 				testData := make([]pageResult, size)
 				copy(testData, data)
-				sortPageResults(testData)
+				// Use standard library sort (matching the optimized implementation)
+				sort.Slice(testData, func(i, j int) bool {
+					return testData[i].pageNum < testData[j].pageNum
+				})
 			}
 		})
 	}
@@ -380,34 +387,9 @@ func ExampleStreamingBatchExtractor() {
 	// }
 }
 
-func TestQuicksortPageResults(t *testing.T) {
-	results := []pageResult{
-		{pageNum: 3, text: "third"},
-		{pageNum: 1, text: "first"},
-		{pageNum: 2, text: "second"},
-	}
-
-	quicksortPageResults(results, 0, len(results)-1)
-
-	if results[0].pageNum != 1 || results[1].pageNum != 2 || results[2].pageNum != 3 {
-		t.Error("quicksortPageResults failed")
-	}
-}
-
-func TestPartitionPageResults(t *testing.T) {
-	results := []pageResult{
-		{pageNum: 3, text: "third"},
-		{pageNum: 1, text: "first"},
-		{pageNum: 2, text: "second"},
-	}
-
-	pivot := partitionPageResults(results, 0, len(results)-1)
-
-	// Check that pivot is in correct position
-	if results[pivot].pageNum != 2 {
-		t.Errorf("Expected pivot at page 2, got %d", results[pivot].pageNum)
-	}
-}
+// Note: TestQuicksortPageResults and TestPartitionPageResults removed
+// These tested internal quicksort implementation which has been replaced
+// with standard library sort.Slice for better performance and maintainability
 
 func TestNewStreamingBatchExtractor(t *testing.T) {
 	reader := &Reader{}

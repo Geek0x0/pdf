@@ -258,7 +258,13 @@ func GetSizedStringBuilder(estimatedSize int) *FastStringBuilder {
 		sb = globalStringBuilderPool.large.Get().(*FastStringBuilder)
 	}
 
-	sb.Reset()
+	// Defensive check: ensure builder is valid
+	if sb == nil {
+		// Pool returned nil, create new builder
+		sb = NewFastStringBuilder(estimatedSize)
+	} else {
+		sb.Reset()
+	}
 	return sb
 }
 

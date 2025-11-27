@@ -79,6 +79,17 @@ func (b *buffer) readByte() byte {
 }
 
 func (b *buffer) reload() bool {
+	// Defensive check: buffer must have a valid reader
+	// If b.r is nil, it indicates a buffer pool corruption or use-after-Put bug
+	if b.r == nil {
+		// Store error instead of panicking - this buffer was incorrectly reused
+		b.readErr = fmt.Errorf("malformed PDF: buffer reader is nil (possible buffer pool corruption at offset %d)", b.offset)
+		b.eof = true
+		b.buf = b.buf[:0]
+		b.pos = 0
+		return false
+	}
+
 	n := cap(b.buf) - int(b.offset%int64(cap(b.buf)))
 	n, err := b.r.Read(b.buf[:n])
 	if n == 0 && err != nil {

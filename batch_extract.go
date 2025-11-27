@@ -7,6 +7,7 @@ package pdf
 import (
 	"context"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 )
@@ -88,11 +89,27 @@ type BatchResult struct {
 // ExtractPagesBatch extracts text from multiple pages in batches
 // This is optimized for high-throughput scenarios with many pages
 func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult {
-	results := make(chan BatchResult, opts.Workers)
+	// Optimize result channel buffer size to reduce blocking
+	// Use Workers * 2 with a reasonable upper limit
+	resultBufferSize := opts.Workers * 2
+	if resultBufferSize <= 0 {
+		resultBufferSize = runtime.NumCPU() * 2
+	}
+	if resultBufferSize > 64 {
+		resultBufferSize = 64
+	}
+	results := make(chan BatchResult, resultBufferSize)
 
 	// Set defaults
 	if opts.Workers <= 0 {
-		opts.Workers = runtime.NumCPU()
+		// Limit workers to prevent excessive goroutines and memory usage
+		workers := runtime.NumCPU()
+		if workers > 4 {
+			workers = 4 // Cap at 4 workers for better memory control
+		} else if workers < 1 {
+			workers = 1
+		}
+		opts.Workers = workers
 	}
 	if opts.Context == nil {
 		opts.Context = context.Background()
@@ -142,9 +159,9 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 	// We use a conservative heuristic: min(5000, pages * 10) to cap maximum cache size.
 	// Only set if not already configured to allow users to override this behavior.
 	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
-		cacheSize := len(pages) * 10
-		if cacheSize > 5000 {
-			cacheSize = 5000 // Cap at 5000 objects to prevent memory explosion
+		cacheSize := len(pages) * 5
+		if cacheSize > 1000 {
+			cacheSize = 1000 // Cap at 1000 objects to reduce memory footprint for GC efficiency
 		}
 		r.SetCacheCapacity(cacheSize)
 	}
@@ -152,12 +169,26 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 	go func() {
 		defer close(results)
 
-		// Create work queue
-		jobs := make(chan int, len(pages))
-		for _, pageNum := range pages {
-			jobs <- pageNum
+		// Create work queue with optimized buffer size
+		// Only buffer a reasonable amount to avoid excessive memory
+		jobBufferSize := opts.Workers * 2
+		if jobBufferSize > len(pages) {
+			jobBufferSize = len(pages)
 		}
-		close(jobs)
+		jobs := make(chan int, jobBufferSize)
+
+		// Start producer goroutine to avoid blocking
+		go func() {
+			for _, pageNum := range pages {
+				select {
+				case jobs <- pageNum:
+				case <-opts.Context.Done():
+					close(jobs)
+					return
+				}
+			}
+			close(jobs)
+		}()
 
 		// Start workers
 		var wg sync.WaitGroup
@@ -183,12 +214,9 @@ func (r *Reader) ExtractPagesBatch(opts BatchExtractOptions) <-chan BatchResult 
 		// immediately after processing completes.
 		r.ClearCache()
 
-		// Trigger garbage collection to free accumulated memory from batch processing.
-		// Large PDF batch processing can create significant temporary allocations
-		// that won't be cleaned up until GC runs. Explicitly calling GC here ensures
-		// memory is returned to the system promptly, preventing memory exhaustion
-		// for applications processing multiple large PDFs in sequence.
-		runtime.GC()
+		// Skip explicit GC - let Go's GC handle this more efficiently
+		// The runtime will handle GC based on memory pressure
+		// Explicit GC calls were creating significant CPU overhead
 	}()
 
 	return results
@@ -232,23 +260,12 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 				page.Cleanup()
 			}()
 
-			// Use a channel to handle timeout
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				if opts.SmartOrdering {
-					text, err = page.GetPlainTextWithSmartOrdering(pageCtx, nil)
-				} else {
-					text, err = page.GetPlainText(pageCtx, nil)
-				}
-			}()
-
-			// Wait for completion or timeout
+			// OPTIMIZATION: Execute directly instead of creating extra goroutine per page
+			// This reduces goroutine overhead significantly (e.g., 1000 pages = 1000 fewer goroutines)
+			// The extraction methods now support context cancellation internally
 			select {
-			case <-done:
-				// Extraction completed
 			case <-pageCtx.Done():
-				// Timeout or cancellation
+				// Context already cancelled/timed out before extraction
 				if pageCtx.Err() == context.DeadlineExceeded {
 					err = &PDFError{
 						Op:   "extract page",
@@ -257,6 +274,13 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 					}
 				} else {
 					err = pageCtx.Err()
+				}
+			default:
+				// Execute extraction with context support
+				if opts.SmartOrdering {
+					text, err = page.GetPlainTextWithSmartOrdering(pageCtx, nil)
+				} else {
+					text, err = page.GetPlainText(pageCtx, nil)
 				}
 			}
 
@@ -284,8 +308,19 @@ type pageResult struct {
 func (r *Reader) ExtractPagesBatchToString(opts BatchExtractOptions) (string, error) {
 	resultChan := r.ExtractPagesBatch(opts)
 
+	// Determine expected number of pages for pre-allocation
+	pages := opts.Pages
+	if len(pages) == 0 {
+		pages = make([]int, r.NumPage())
+		for i := range pages {
+			pages[i] = i + 1
+		}
+	}
+
+	// Pre-allocate results slice to avoid multiple reallocations
+	results := make([]pageResult, 0, len(pages))
+
 	// Collect results
-	var results []pageResult
 	for result := range resultChan {
 		if result.Error != nil {
 			return "", &PDFError{
@@ -302,7 +337,10 @@ func (r *Reader) ExtractPagesBatchToString(opts BatchExtractOptions) (string, er
 
 	// Sort by page number to maintain order
 	// (results may arrive out of order due to concurrency)
-	sortPageResults(results)
+	// Use standard library sort which is highly optimized
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].pageNum < results[j].pageNum
+	})
 
 	// Combine into single string
 	totalSize := 0
@@ -324,53 +362,6 @@ func (r *Reader) ExtractPagesBatchToString(opts BatchExtractOptions) (string, er
 	return builder.String(), nil
 }
 
-// sortPageResults sorts results by page number using quicksort
-func sortPageResults(results []pageResult) {
-	if len(results) <= 1 {
-		return
-	}
-
-	// Simple insertion sort for small arrays
-	if len(results) < 20 {
-		for i := 1; i < len(results); i++ {
-			key := results[i]
-			j := i - 1
-			for j >= 0 && results[j].pageNum > key.pageNum {
-				results[j+1] = results[j]
-				j--
-			}
-			results[j+1] = key
-		}
-		return
-	}
-
-	// Quicksort for larger arrays
-	quicksortPageResults(results, 0, len(results)-1)
-}
-
-func quicksortPageResults(results []pageResult, low, high int) {
-	if low < high {
-		pivot := partitionPageResults(results, low, high)
-		quicksortPageResults(results, low, pivot-1)
-		quicksortPageResults(results, pivot+1, high)
-	}
-}
-
-func partitionPageResults(results []pageResult, low, high int) int {
-	pivot := results[high].pageNum
-	i := low - 1
-
-	for j := low; j < high; j++ {
-		if results[j].pageNum < pivot {
-			i++
-			results[i], results[j] = results[j], results[i]
-		}
-	}
-
-	results[i+1], results[high] = results[high], results[i+1]
-	return i + 1
-}
-
 // BatchExtractStructured extracts structured text from multiple pages in batches
 type StructuredBatchResult struct {
 	PageNum int
@@ -384,7 +375,14 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 
 	// Set defaults
 	if opts.Workers <= 0 {
-		opts.Workers = runtime.NumCPU()
+		// Limit workers to prevent excessive goroutines and memory usage
+		workers := runtime.NumCPU()
+		if workers > 4 {
+			workers = 4 // Cap at 4 workers for better memory control
+		} else if workers < 1 {
+			workers = 1
+		}
+		opts.Workers = workers
 	}
 	if opts.Context == nil {
 		opts.Context = context.Background()
@@ -405,9 +403,9 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 	// We use a conservative heuristic: min(5000, pages * 10) to cap maximum cache size.
 	// Only set if not already configured to allow users to override this behavior.
 	if r.GetCacheCapacity() <= 0 && len(pages) > 0 {
-		cacheSize := len(pages) * 10
-		if cacheSize > 5000 {
-			cacheSize = 5000 // Cap at 5000 objects to prevent memory explosion
+		cacheSize := len(pages) * 5
+		if cacheSize > 1000 {
+			cacheSize = 1000 // Cap at 1000 objects to reduce memory footprint for GC efficiency
 		}
 		r.SetCacheCapacity(cacheSize)
 	}
@@ -438,12 +436,9 @@ func (r *Reader) ExtractStructuredBatch(opts BatchExtractOptions) <-chan Structu
 		// immediately after processing completes.
 		r.ClearCache()
 
-		// Trigger garbage collection to free accumulated memory from batch processing.
-		// Large PDF batch processing can create significant temporary allocations
-		// that won't be cleaned up until GC runs. Explicitly calling GC here ensures
-		// memory is returned to the system promptly, preventing memory exhaustion
-		// for applications processing multiple large PDFs in sequence.
-		runtime.GC()
+		// Skip explicit GC - let Go's GC handle this more efficiently
+		// The runtime will handle GC based on memory pressure
+		// Explicit GC calls were creating significant CPU overhead
 	}()
 
 	return results

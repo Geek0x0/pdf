@@ -829,6 +829,7 @@ func tryRecoverFromOffset116(r *Reader) ([]xref, objptr, dict, error) {
 			if err == nil {
 				return xr, tp, tr, nil
 			}
+			continue // Skip the Put at the end since we already Put
 		}
 
 		// Check if it's an xref stream (starts with object number)
@@ -839,6 +840,7 @@ func tryRecoverFromOffset116(r *Reader) ([]xref, objptr, dict, error) {
 			if err == nil {
 				return xr, tp, tr, nil
 			}
+			continue // Skip the Put at the end since we already Put
 		}
 
 		PutPDFBuffer(b)

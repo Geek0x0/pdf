@@ -78,13 +78,13 @@ func clusterTextBlocks(texts []Text) []*TextBlock {
 		return nil
 	}
 
-	// For small datasets, use simple method (threshold raised to 500 for better performance)
-	if len(texts) < 500 {
+	// For small datasets, use simple method (reduced threshold to use V3 more)
+	if len(texts) < 50 {
 		return clusterTextBlocksSimple(texts)
 	}
 
-	// For large datasets, use optimized KD-Tree method
-	return ClusterTextBlocksOptimizedV2(texts)
+	// For large datasets, use optimized spatial grid algorithm (V3)
+	return ClusterTextBlocksV3(texts)
 }
 
 // clusterTextBlocksSimple Simple clustering method (for small datasets)
@@ -622,21 +622,16 @@ func buildPlainTextOptimized(texts []Text) string {
 		return ""
 	}
 
-	// Pre-calculate total length for single allocation
-	totalLen := 0
-	for i := range texts {
-		totalLen += len(texts[i].S) + 2 // text + potential space/newline
-	}
+	// Use pooled string builder for better memory reuse
+	builder := GetSizedStringBuilder(0)
+	defer PutSizedStringBuilder(builder, 0)
 
-	// Build directly into byte slice (faster than strings.Builder for known size)
-	result := make([]byte, 0, totalLen)
 	const lineTolerance = 3.0
 	var prevY float64
 	var prevX float64
 	var prevW float64
 
-	for i := range texts {
-		t := &texts[i]
+	for i, t := range texts {
 		if i > 0 {
 			// Inline abs calculation
 			dy := t.Y - prevY
@@ -645,22 +640,22 @@ func buildPlainTextOptimized(texts []Text) string {
 			}
 			if dy > lineTolerance {
 				// New line
-				result = append(result, '\n')
+				builder.WriteByte('\n')
 			} else {
 				// Same line - check if space needed
 				gap := t.X - (prevX + prevW)
 				if gap > t.FontSize*0.3 {
-					result = append(result, ' ')
+					builder.WriteByte(' ')
 				}
 			}
 		}
-		result = append(result, t.S...)
+		builder.WriteString(t.S)
 		prevY = t.Y
 		prevX = t.X
 		prevW = t.W
 	}
 
-	return string(result)
+	return builder.String()
 }
 
 // isAsymmetricLayout checks if two blocks are in different asymmetric layout regions

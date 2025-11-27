@@ -178,6 +178,12 @@ func NewFastStringBuilder(estimatedSize int) *FastStringBuilder {
 
 // WriteString appends a string
 func (b *FastStringBuilder) WriteString(s string) {
+	if b == nil {
+		return
+	}
+	if b.buf == nil {
+		b.buf = make([]byte, 0, 512)
+	}
 	b.buf = append(b.buf, s...)
 }
 
@@ -199,6 +205,13 @@ func (b *FastStringBuilder) Len() int {
 
 // Reset clears the builder
 func (b *FastStringBuilder) Reset() {
+	if b == nil {
+		return
+	}
+	if b.buf == nil {
+		b.buf = make([]byte, 0, 512)
+		return
+	}
 	b.buf = b.buf[:0]
 }
 

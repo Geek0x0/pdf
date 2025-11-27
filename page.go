@@ -1586,38 +1586,99 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 	if enc == nil {
 		enc = &nopEncoder{}
 	}
-	n := 0
+
 	decoded := enc.Decode(s)
+	decodedLen := len(decoded)
+	if decodedLen == 0 {
+		return
+	}
+
 	vertical := g.Tf.writingMode() == 1
 
-	// Pre-allocate text slice capacity to avoid multiple expansions
-	if cap(ce.text)-len(ce.text) < len(decoded) {
-		newCap := len(ce.text) + len(decoded) + 64 // additionally reserve 64 positions
-		newText := make([]Text, len(ce.text), newCap)
+	// Optimized: batch pre-allocation - extend slice to final size once
+	oldLen := len(ce.text)
+	newLen := oldLen + decodedLen
+
+	// Ensure capacity with growth strategy to reduce future allocations
+	if cap(ce.text) < newLen {
+		// Growth strategy: add extra capacity (50% of needed or min 128)
+		extraCap := decodedLen / 2
+		if extraCap < 128 {
+			extraCap = 128
+		}
+		newCap := newLen + extraCap
+		newText := make([]Text, oldLen, newCap)
 		copy(newText, ce.text)
 		ce.text = newText
 	}
 
-	for _, ch := range decoded {
+	// Set length to final size - avoid repeated append
+	ce.text = ce.text[:newLen]
+
+	// Pre-compute common values outside loop
+	f := g.Tf.BaseFont()
+	if i := strings.Index(f, "+"); i >= 0 {
+		f = f[i+1:]
+	}
+	bold, italic, underline := parseFontStyles(f)
+
+	// Pre-compute base transformation matrix components
+	// Trm = matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
+	// Pre-compute the constant part: textMatrix = {{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}
+	tfsth := g.Tfs * g.Th
+	trise := g.Trise
+
+	// Cache CTM values for faster access
+	ctm := g.CTM
+
+	// Batch processing: fill slice directly instead of append
+	n := 0
+	for i, ch := range decoded {
 		var w0 float64
 		if n < len(s) {
 			w0 = g.Tf.Width(int(s[n]))
 		}
 		n++
 
-		f := g.Tf.BaseFont()
-		if i := strings.Index(f, "+"); i >= 0 {
-			f = f[i+1:]
-		}
+		// Inline matrix multiplication to avoid function call overhead
+		// Trm = textMatrix.mul(g.Tm).mul(g.CTM)
+		tm := g.Tm
+		// First: textMatrix.mul(tm)
+		// textMatrix is {{tfsth, 0, 0}, {0, tfs, 0}, {0, trise, 1}}
+		// Row 0: tfsth * tm[0]
+		temp00 := tfsth * tm[0][0]
+		temp01 := tfsth * tm[0][1]
+		temp02 := tfsth * tm[0][2]
+		// Row 2: trise * tm[1] + tm[2]
+		temp20 := trise*tm[1][0] + tm[2][0]
+		temp21 := trise*tm[1][1] + tm[2][1]
+		temp22 := trise*tm[1][2] + tm[2][2]
 
-		Trm := matrix{{g.Tfs * g.Th, 0, 0}, {0, g.Tfs, 0}, {0, g.Trise, 1}}.mul(g.Tm).mul(g.CTM)
-		bold, italic, underline := parseFontStyles(f)
-		// Reduce memory allocation of string(ch), directly use decoded string
-		ce.text = append(ce.text, Text{f, Trm[0][0], Trm[2][0], Trm[2][1], w0 / 1000 * Trm[0][0], InternRune(ch), vertical, bold, italic, underline})
+		// Second: result.mul(ctm)
+		trm00 := temp00*ctm[0][0] + temp01*ctm[1][0] + temp02*ctm[2][0]
+		trm20 := temp20*ctm[0][0] + temp21*ctm[1][0] + temp22*ctm[2][0]
+		trm21 := temp20*ctm[0][1] + temp21*ctm[1][1] + temp22*ctm[2][1]
+
+		// Direct assignment instead of append - no reallocation
+		ce.text[oldLen+i] = Text{
+			f,
+			trm00,
+			trm20,
+			trm21,
+			w0 / 1000 * trm00,
+			InternRune(ch),
+			vertical,
+			bold,
+			italic,
+			underline,
+		}
 
 		tx := w0/1000*g.Tfs + g.Tc
 		tx *= g.Th
-		g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
+		// Update g.Tm inline: g.Tm = matrix{{1, 0, 0}, {0, 1, 0}, {tx, 0, 1}}.mul(g.Tm)
+		g.Tm[2][0] += tx * g.Tm[0][0]
+		g.Tm[2][1] += tx * g.Tm[0][1]
+		g.Tm[2][2] += tx * g.Tm[0][2]
 	}
 }
 

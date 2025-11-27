@@ -17,6 +17,7 @@ type TextBlock struct {
 	MinY        float64
 	MaxY        float64
 	AvgFontSize float64
+	clusterIdx  int // Internal index for clustering, avoids map lookups
 }
 
 // Bounds returns the bounding box of the text block
@@ -705,44 +706,45 @@ func detectFootnotes(blocks []*TextBlock, pageHeight float64) []*TextBlock {
 
 	return footnotes
 }
+
 // sortWithinBlockOptimized is an optimized version that reduces allocations
 func sortWithinBlockOptimized(texts []Text) []Text {
-if len(texts) == 0 {
-return texts
-}
+	if len(texts) == 0 {
+		return texts
+	}
 
-const lineTolerance = 3.0
+	const lineTolerance = 3.0
 
-// Sort by Y first (top to bottom), then X (left to right)
-sort.Slice(texts, func(i, j int) bool {
-deltaY := texts[i].Y - texts[j].Y
-if deltaY > lineTolerance || deltaY < -lineTolerance {
-return texts[i].Y > texts[j].Y
-}
-return texts[i].X < texts[j].X
-})
+	// Sort by Y first (top to bottom), then X (left to right)
+	sort.Slice(texts, func(i, j int) bool {
+		deltaY := texts[i].Y - texts[j].Y
+		if deltaY > lineTolerance || deltaY < -lineTolerance {
+			return texts[i].Y > texts[j].Y
+		}
+		return texts[i].X < texts[j].X
+	})
 
-// Process in-place without creating line structures
-// Find line boundaries and sort within each line
-n := len(texts)
-lineStart := 0
+	// Process in-place without creating line structures
+	// Find line boundaries and sort within each line
+	n := len(texts)
+	lineStart := 0
 
-for i := 1; i <= n; i++ {
-// Check if this is end of a line (or end of texts)
-isLineEnd := i == n || math.Abs(texts[i].Y-texts[lineStart].Y) > lineTolerance
+	for i := 1; i <= n; i++ {
+		// Check if this is end of a line (or end of texts)
+		isLineEnd := i == n || math.Abs(texts[i].Y-texts[lineStart].Y) > lineTolerance
 
-if isLineEnd && i > lineStart+1 {
-// Sort this line segment by X
-lineTexts := texts[lineStart:i]
-sort.Slice(lineTexts, func(a, b int) bool {
-return lineTexts[a].X < lineTexts[b].X
-})
-}
+		if isLineEnd && i > lineStart+1 {
+			// Sort this line segment by X
+			lineTexts := texts[lineStart:i]
+			sort.Slice(lineTexts, func(a, b int) bool {
+				return lineTexts[a].X < lineTexts[b].X
+			})
+		}
 
-if isLineEnd && i < n {
-lineStart = i
-}
-}
+		if isLineEnd && i < n {
+			lineStart = i
+		}
+	}
 
-return texts
+	return texts
 }

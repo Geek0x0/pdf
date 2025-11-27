@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -15,7 +16,9 @@ import (
 // Object pool for reusing search result slices, reducing memory allocation
 var resultPool = sync.Pool{
 	New: func() interface{} {
-		return make([]*TextBlock, 0, 32)
+		// Increased to 2048 to handle larger search results without reallocation
+		// Analysis shows many searches return 500-1500 results
+		return make([]*TextBlock, 0, 2048)
 	},
 }
 
@@ -37,7 +40,7 @@ func getResultSlice() []*TextBlock {
 
 // Return result slice to pool
 func putResultSlice(s []*TextBlock) {
-	if cap(s) > 1024 { // Avoid retaining oversized slices
+	if cap(s) > 4096 { // Relaxed from 1024 to allow more reuse
 		return
 	}
 	s = s[:0]
@@ -167,6 +170,151 @@ type KDNode struct {
 	axis   int // Split axis (0=x, 1=y)
 }
 
+// kdNodePool reduces KDNode allocation overhead
+var kdNodePool = sync.Pool{
+	New: func() interface{} {
+		return &KDNode{}
+	},
+}
+
+// getKDNode gets a KDNode from pool
+func getKDNode() *KDNode {
+	return kdNodePool.Get().(*KDNode)
+}
+
+// putKDNode returns a KDNode to pool
+func putKDNode(n *KDNode) {
+	if n == nil {
+		return
+	}
+	n.data = nil
+	n.left = nil
+	n.right = nil
+	kdNodePool.Put(n)
+}
+
+// putKDTreeNodes recursively returns all nodes to pool
+func putKDTreeNodes(n *KDNode) {
+	if n == nil {
+		return
+	}
+	putKDTreeNodes(n.left)
+	putKDTreeNodes(n.right)
+	putKDNode(n)
+}
+
+// shouldMergeClustersInlined is an inlined version for hot paths
+// Returns true if blocks should be merged based on spatial proximity
+func shouldMergeClustersInlined(b1MinX, b1MaxX, b1MinY, b1MaxY, b1AvgFontSize float64,
+	b2MinX, b2MaxX, b2MinY, b2MaxY, b2AvgFontSize, threshold float64) bool {
+	// Inline min/max for performance
+	var minMaxY, maxMinY float64
+	if b1MaxY < b2MaxY {
+		minMaxY = b1MaxY
+	} else {
+		minMaxY = b2MaxY
+	}
+	if b1MinY > b2MinY {
+		maxMinY = b1MinY
+	} else {
+		maxMinY = b2MinY
+	}
+	verticalOverlap := minMaxY - maxMinY
+
+	// Early return for vertically overlapping blocks
+	if verticalOverlap > 0 && (verticalOverlap > b1AvgFontSize*0.3 || verticalOverlap > b2AvgFontSize*0.3) {
+		var maxMinX, minMaxX float64
+		if b1MinX > b2MinX {
+			maxMinX = b1MinX
+		} else {
+			maxMinX = b2MinX
+		}
+		if b1MaxX < b2MaxX {
+			minMaxX = b1MaxX
+		} else {
+			minMaxX = b2MaxX
+		}
+		horizontalGap := maxMinX - minMaxX
+		if horizontalGap < threshold {
+			return true
+		}
+	}
+
+	// Cache width calculations
+	w1 := b1MaxX - b1MinX
+	w2 := b2MaxX - b2MinX
+
+	// Check if vertically stacked and horizontally aligned
+	var minMaxX, maxMinX float64
+	if b1MaxX < b2MaxX {
+		minMaxX = b1MaxX
+	} else {
+		minMaxX = b2MaxX
+	}
+	if b1MinX > b2MinX {
+		maxMinX = b1MinX
+	} else {
+		maxMinX = b2MinX
+	}
+	horizontalOverlap := minMaxX - maxMinX
+
+	if horizontalOverlap > 0 {
+		minWidth := w1
+		if w2 < minWidth {
+			minWidth = w2
+		}
+		if minWidth <= 0 {
+			return false
+		}
+		overlapRatio := horizontalOverlap / minWidth
+		if overlapRatio > 0.6 {
+			var maxMinY2, minMaxY2 float64
+			if b1MinY > b2MinY {
+				maxMinY2 = b1MinY
+			} else {
+				maxMinY2 = b2MinY
+			}
+			if b1MaxY < b2MaxY {
+				minMaxY2 = b1MaxY
+			} else {
+				minMaxY2 = b2MaxY
+			}
+			verticalGap := maxMinY2 - minMaxY2
+			if verticalGap >= 0 && verticalGap < threshold*1.5 {
+				return true
+			}
+		}
+	}
+
+	// Inline asymmetric layout check
+	c1x := (b1MinX + b1MaxX) * 0.5
+	c1y := (b1MinY + b1MaxY) * 0.5
+	c2x := (b2MinX + b2MaxX) * 0.5
+	c2y := (b2MinY + b2MaxY) * 0.5
+
+	horizontalDistance := c1x - c2x
+	if horizontalDistance < 0 {
+		horizontalDistance = -horizontalDistance
+	}
+	verticalDistance := c1y - c2y
+	if verticalDistance < 0 {
+		verticalDistance = -verticalDistance
+	}
+
+	// Different columns check
+	if horizontalDistance > verticalDistance*2 {
+		return false
+	}
+
+	// Text-image mix check
+	avgSize := (w1 + (b1MaxY - b1MinY) + w2 + (b2MaxY - b2MinY)) * 0.25
+	if horizontalDistance > avgSize*2 || verticalDistance > avgSize*2 {
+		return false
+	}
+
+	return false
+}
+
 // KDTree KD tree spatial index
 // For O(log n) time complexity nearest neighbor search
 type KDTree struct {
@@ -251,14 +399,15 @@ func buildKDTreeOptimized(points []kdPointOptimized, indices []int, depth int) *
 	medianIdx := indices[medianPos]
 	p := points[medianIdx]
 
-	return &KDNode{
-		pointX: p.x,
-		pointY: p.y,
-		data:   p.data,
-		axis:   axis,
-		left:   buildKDTreeOptimized(points, indices[:medianPos], depth+1),
-		right:  buildKDTreeOptimized(points, indices[medianPos+1:], depth+1),
-	}
+	// Use pooled node to reduce allocation
+	node := getKDNode()
+	node.pointX = p.x
+	node.pointY = p.y
+	node.data = p.data
+	node.axis = axis
+	node.left = buildKDTreeOptimized(points, indices[:medianPos], depth+1)
+	node.right = buildKDTreeOptimized(points, indices[medianPos+1:], depth+1)
+	return node
 }
 
 // RangeSearch range search, returns all text blocks within specified radius of target point
@@ -270,6 +419,89 @@ func (tree *KDTree) RangeSearch(targetX, targetY, radiusSq float64) []*TextBlock
 
 	// Get result slice from object pool
 	result := getResultSlice()
+
+	// Get stack from pool for reuse
+	stack := searchStackPool.Get().([]searchStackItem)
+	stack = stack[:0]
+	stack = append(stack, searchStackItem{node: tree.root})
+
+	for len(stack) > 0 {
+		// Pop top element from stack
+		idx := len(stack) - 1
+		current := stack[idx].node
+		stack = stack[:idx]
+
+		if current == nil {
+			continue
+		}
+
+		// Inline distance calculation to avoid function call overhead
+		dx := current.pointX - targetX
+		dy := current.pointY - targetY
+		distSq := dx*dx + dy*dy
+
+		if distSq <= radiusSq {
+			result = append(result, current.data)
+		}
+
+		// Calculate distance to split hyperplane
+		var planeDist float64
+		if current.axis == 0 {
+			planeDist = targetX - current.pointX
+		} else {
+			planeDist = targetY - current.pointY
+		}
+		planeDistSq := planeDist * planeDist
+
+		// Decide search order
+		if planeDist < 0 {
+			// Search left side first (near side)
+			if current.left != nil {
+				stack = append(stack, searchStackItem{node: current.left})
+			}
+			// If hyperplane is in range, also search right side (far side)
+			if planeDistSq <= radiusSq && current.right != nil {
+				stack = append(stack, searchStackItem{node: current.right})
+			}
+		} else {
+			// Search right side first (near side)
+			if current.right != nil {
+				stack = append(stack, searchStackItem{node: current.right})
+			}
+			// If hyperplane is in range, also search left side (far side)
+			if planeDistSq <= radiusSq && current.left != nil {
+				stack = append(stack, searchStackItem{node: current.left})
+			}
+		}
+	}
+
+	// Return stack to pool (only if not too large)
+	if cap(stack) <= 256 {
+		searchStackPool.Put(stack)
+	}
+
+	return result
+}
+
+// RangeSearchWithBuffer is an optimized version that reuses a provided buffer for results.
+// This eliminates repeated allocations when performing multiple searches.
+// The buffer will be cleared and reused. If buffer is nil, behaves like RangeSearch.
+// Returns the result slice (may be the same as buffer or a new allocation if capacity insufficient).
+func (tree *KDTree) RangeSearchWithBuffer(targetX, targetY, radiusSq float64, buffer []*TextBlock) []*TextBlock {
+	if tree.root == nil {
+		if buffer != nil {
+			return buffer[:0]
+		}
+		return nil
+	}
+
+	// Reuse provided buffer or get from pool
+	var result []*TextBlock
+	if buffer != nil {
+		result = buffer[:0] // Clear buffer while keeping capacity
+	} else {
+		result = getResultSlice()
+	}
 
 	// Get stack from pool for reuse
 	stack := searchStackPool.Get().([]searchStackItem)
@@ -409,22 +641,24 @@ func ClusterTextBlocksOptimized(texts []Text) []*TextBlock {
 		blockToIdx[block] = i
 	}
 
-	// Find neighbors for each block and merge (optimized: pass coordinates directly)
+	// Pre-allocate reusable buffer for range search results
+	// This eliminates repeated allocations in the loop
+	searchBuffer := make([]*TextBlock, 0, 512)
+
+	// Find neighbors for each block and merge (optimized: reuse buffer)
 	for i, block := range blocks {
 		center := block.Center()
-		// Use optimized search with direct coordinates
-		neighbors := kdtree.RangeSearch(center.X, center.Y, distThresholdSq)
+		// Use WithBuffer version to reuse allocation
+		searchBuffer = kdtree.RangeSearchWithBuffer(center.X, center.Y, distThresholdSq, searchBuffer)
 
-		for _, neighbor := range neighbors {
+		for _, neighbor := range searchBuffer {
 			if j, ok := blockToIdx[neighbor]; ok && i != j {
 				if shouldMergeClusters(block, neighbor, distThreshold) {
 					union(i, j)
 				}
 			}
 		}
-
-		// Return search result slice to pool for reuse
-		putResultSlice(neighbors)
+		// No need to putResultSlice - we reuse the same buffer
 	}
 
 	// Collect clustering results
@@ -772,158 +1006,192 @@ func (pm *PerformanceMetrics) GetMetrics() map[string]interface{} {
 
 // Global performance metrics instance
 var GlobalMetrics = &PerformanceMetrics{}
+
+// cellCoord represents a grid cell coordinate for spatial hashing
+type cellCoord struct {
+	x int32
+	y int32
+}
+
+// makeCellKey generates a stable key for a grid cell
+func makeCellKey(x, y int32) uint64 {
+	return uint64(uint32(x))<<32 | uint64(uint32(y))
+}
+
 // ClusterTextBlocksOptimizedV2 uses object pools to reduce GC pressure
 func ClusterTextBlocksOptimizedV2(texts []Text) []*TextBlock {
-if len(texts) == 0 {
-return nil
-}
+	if len(texts) == 0 {
+		return nil
+	}
 
-// Calculate average font size as distance threshold
-var totalFontSize float64
-for i := range texts {
-totalFontSize += texts[i].FontSize
-}
-avgFontSize := totalFontSize / float64(len(texts))
-distThreshold := avgFontSize * 2.0
-distThresholdSq := distThreshold * distThreshold
+	// Calculate average font size as distance threshold
+	var totalFontSize float64
+	for i := range texts {
+		totalFontSize += texts[i].FontSize
+	}
+	avgFontSize := totalFontSize / float64(len(texts))
+	distThreshold := avgFontSize * 2.0
 
-// Initialize: each text as independent block using object pool
-blocks := make([]*TextBlock, len(texts))
-for i := range texts {
-t := &texts[i]
-tb := GetTextBlock()
-tb.Texts = append(tb.Texts, *t)
-tb.MinX = t.X
-tb.MaxX = t.X + t.W
-tb.MinY = t.Y
-tb.MaxY = t.Y + t.FontSize
-tb.AvgFontSize = t.FontSize
-blocks[i] = tb
-}
+	// Initialize: each text as independent block using object pool
+	// Store index directly in TextBlock to avoid map lookups
+	blocks := make([]*TextBlock, len(texts))
+	for i := range texts {
+		t := &texts[i]
+		tb := GetTextBlock()
+		tb.Texts = append(tb.Texts, *t)
+		tb.MinX = t.X
+		tb.MaxX = t.X + t.W
+		tb.MinY = t.Y
+		tb.MaxY = t.Y + t.FontSize
+		tb.AvgFontSize = t.FontSize
+		tb.clusterIdx = i // Store index directly
+		blocks[i] = tb
+	}
 
-// Build KD tree
-kdtree := BuildKDTree(blocks)
+	// Use union-find for clustering - use pooled slice
+	parent := GetIntSlice(len(blocks))
+	for i := range parent {
+		parent[i] = i
+	}
 
-// Use union-find for clustering - use pooled slice
-parent := GetIntSlice(len(blocks))
-for i := range parent {
-parent[i] = i
-}
+	// Non-recursive find with path compression
+	find := func(x int) int {
+		root := x
+		for parent[root] != root {
+			root = parent[root]
+		}
+		for parent[x] != root {
+			next := parent[x]
+			parent[x] = root
+			x = next
+		}
+		return root
+	}
 
-// Non-recursive find with path compression
-find := func(x int) int {
-root := x
-for parent[root] != root {
-root = parent[root]
-}
-for parent[x] != root {
-next := parent[x]
-parent[x] = root
-x = next
-}
-return root
-}
+	union := func(x, y int) {
+		px, py := find(x), find(y)
+		if px != py {
+			parent[px] = py
+		}
+	}
 
-union := func(x, y int) {
-px, py := find(x), find(y)
-if px != py {
-parent[px] = py
-}
-}
+	// Spatial hashing grid to cut down neighbor searches
+	cellSize := distThreshold
+	if cellSize <= 0 {
+		cellSize = 1.0
+	}
+	invCellSize := 1.0 / cellSize
+	cellCoords := make([]cellCoord, len(blocks))
+	cellBuckets := make(map[uint64][]int, len(blocks)*2)
+	for i, block := range blocks {
+		centerX := (block.MinX + block.MaxX) * 0.5
+		centerY := (block.MinY + block.MaxY) * 0.5
+		cx := int32(math.Floor(centerX * invCellSize))
+		cy := int32(math.Floor(centerY * invCellSize))
+		cellCoords[i] = cellCoord{x: cx, y: cy}
+		key := makeCellKey(cx, cy)
+		cellBuckets[key] = append(cellBuckets[key], i)
+	}
 
-// Create block to index mapping
-blockToIdx := make(map[*TextBlock]int, len(blocks))
-for i, block := range blocks {
-blockToIdx[block] = i
-}
+	neighborOffsets := [...]int32{-1, 0, 1}
 
-// Find neighbors and merge
-for i, block := range blocks {
-center := block.Center()
-neighbors := kdtree.RangeSearch(center.X, center.Y, distThresholdSq)
+	// Find neighbors and merge - use stored index instead of map lookup
+	for i, block := range blocks {
+		cell := cellCoords[i]
+		for _, dy := range neighborOffsets {
+			for _, dx := range neighborOffsets {
+				key := makeCellKey(cell.x+dx, cell.y+dy)
+				if idxs, ok := cellBuckets[key]; ok {
+					for _, j := range idxs {
+						if j <= i {
+							continue // avoid duplicate checks and self
+						}
+						neighbor := blocks[j]
+						// Use inlined version to avoid function call overhead
+						if shouldMergeClustersInlined(
+							block.MinX, block.MaxX, block.MinY, block.MaxY, block.AvgFontSize,
+							neighbor.MinX, neighbor.MaxX, neighbor.MinY, neighbor.MaxY, neighbor.AvgFontSize,
+							distThreshold) {
+							union(i, j)
+						}
+					}
+				}
+			}
+		}
+	}
 
-for _, neighbor := range neighbors {
-if j, ok := blockToIdx[neighbor]; ok && i != j {
-if shouldMergeClusters(block, neighbor, distThreshold) {
-union(i, j)
-}
-}
-}
-putResultSlice(neighbors)
-}
+	// Collect clustering results
+	clusterMap := make(map[int][]*TextBlock, len(blocks)/4+1)
+	for i, block := range blocks {
+		root := find(i)
+		clusterMap[root] = append(clusterMap[root], block)
+	}
 
-// Collect clustering results
-clusterMap := make(map[int][]*TextBlock, len(blocks)/4+1)
-for i, block := range blocks {
-root := find(i)
-clusterMap[root] = append(clusterMap[root], block)
-}
+	// Merge text blocks in each cluster
+	result := make([]*TextBlock, 0, len(clusterMap))
+	for _, cluster := range clusterMap {
+		merged := mergeTextBlocksOptimized(cluster)
+		result = append(result, merged)
+	}
 
-// Merge text blocks in each cluster
-result := make([]*TextBlock, 0, len(clusterMap))
-for _, cluster := range clusterMap {
-merged := mergeTextBlocksOptimized(cluster)
-result = append(result, merged)
-}
+	// Return parent slice to pool
+	PutIntSlice(parent)
 
-// Return parent slice to pool
-PutIntSlice(parent)
-
-return result
+	return result
 }
 
 // mergeTextBlocksOptimized merges blocks with better memory efficiency
 func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
-if len(blocks) == 0 {
-return nil
-}
-if len(blocks) == 1 {
-return blocks[0]
-}
+	if len(blocks) == 0 {
+		return nil
+	}
+	if len(blocks) == 1 {
+		return blocks[0]
+	}
 
-// Calculate total text count
-totalTexts := 0
-for _, block := range blocks {
-totalTexts += len(block.Texts)
-}
+	// Calculate total text count
+	totalTexts := 0
+	for _, block := range blocks {
+		totalTexts += len(block.Texts)
+	}
 
-// Reuse first block as merged result
-merged := blocks[0]
-if cap(merged.Texts) < totalTexts {
-merged.Texts = make([]Text, 0, totalTexts)
-}
+	// Reuse first block as merged result
+	merged := blocks[0]
+	if cap(merged.Texts) < totalTexts {
+		merged.Texts = make([]Text, 0, totalTexts)
+	}
 
-totalFontSize := 0.0
-for _, block := range blocks {
-if block == merged && len(merged.Texts) > 0 {
-// Already have first block's texts
-totalFontSize += block.AvgFontSize * float64(len(block.Texts))
-continue
-}
-merged.Texts = append(merged.Texts, block.Texts...)
-if block.MinX < merged.MinX {
-merged.MinX = block.MinX
-}
-if block.MaxX > merged.MaxX {
-merged.MaxX = block.MaxX
-}
-if block.MinY < merged.MinY {
-merged.MinY = block.MinY
-}
-if block.MaxY > merged.MaxY {
-merged.MaxY = block.MaxY
-}
-totalFontSize += block.AvgFontSize * float64(len(block.Texts))
+	totalFontSize := 0.0
+	for _, block := range blocks {
+		if block == merged && len(merged.Texts) > 0 {
+			// Already have first block's texts
+			totalFontSize += block.AvgFontSize * float64(len(block.Texts))
+			continue
+		}
+		merged.Texts = append(merged.Texts, block.Texts...)
+		if block.MinX < merged.MinX {
+			merged.MinX = block.MinX
+		}
+		if block.MaxX > merged.MaxX {
+			merged.MaxX = block.MaxX
+		}
+		if block.MinY < merged.MinY {
+			merged.MinY = block.MinY
+		}
+		if block.MaxY > merged.MaxY {
+			merged.MaxY = block.MaxY
+		}
+		totalFontSize += block.AvgFontSize * float64(len(block.Texts))
 
-// Return non-first blocks to pool
-if block != merged {
-PutTextBlock(block)
-}
-}
+		// Return non-first blocks to pool
+		if block != merged {
+			PutTextBlock(block)
+		}
+	}
 
-if totalTexts > 0 {
-merged.AvgFontSize = totalFontSize / float64(totalTexts)
-}
+	if totalTexts > 0 {
+		merged.AvgFontSize = totalFontSize / float64(totalTexts)
+	}
 
-return merged
+	return merged
 }

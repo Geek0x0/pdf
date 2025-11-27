@@ -18,15 +18,59 @@ import (
 
 // parseFontStyles parses font name to detect bold, italic, underline styles
 func parseFontStyles(fontName string) (bold, italic, underline bool) {
-	lower := strings.ToLower(fontName)
-	if strings.Contains(lower, "bold") || strings.Contains(lower, "black") {
-		bold = true
+	// Optimized: avoid ToLower allocation by checking both cases inline
+	n := len(fontName)
+
+	// Check for "bold" or "black" (case-insensitive, no allocation)
+	for i := 0; i+3 < n; i++ {
+		c := fontName[i]
+		// Check for "bold"
+		if (c == 'B' || c == 'b') &&
+			(fontName[i+1] == 'O' || fontName[i+1] == 'o') &&
+			(fontName[i+2] == 'L' || fontName[i+2] == 'l') &&
+			(fontName[i+3] == 'D' || fontName[i+3] == 'd') {
+			bold = true
+			break
+		}
+		// Check for "black" (also considered bold)
+		if i+4 < n &&
+			(c == 'B' || c == 'b') &&
+			(fontName[i+1] == 'L' || fontName[i+1] == 'l') &&
+			(fontName[i+2] == 'A' || fontName[i+2] == 'a') &&
+			(fontName[i+3] == 'C' || fontName[i+3] == 'c') &&
+			(fontName[i+4] == 'K' || fontName[i+4] == 'k') {
+			bold = true
+			break
+		}
 	}
-	if strings.Contains(lower, "italic") || strings.Contains(lower, "oblique") {
-		italic = true
+
+	// Check for "italic" or "oblique" (case-insensitive, no allocation)
+	for i := 0; i+5 < n; i++ {
+		c := fontName[i]
+		// Check for "italic"
+		if (c == 'I' || c == 'i') &&
+			(fontName[i+1] == 'T' || fontName[i+1] == 't') &&
+			(fontName[i+2] == 'A' || fontName[i+2] == 'a') &&
+			(fontName[i+3] == 'L' || fontName[i+3] == 'l') &&
+			(fontName[i+4] == 'I' || fontName[i+4] == 'i') &&
+			(fontName[i+5] == 'C' || fontName[i+5] == 'c') {
+			italic = true
+			break
+		}
+		// Check for "oblique"
+		if i+6 < n &&
+			(c == 'O' || c == 'o') &&
+			(fontName[i+1] == 'B' || fontName[i+1] == 'b') &&
+			(fontName[i+2] == 'L' || fontName[i+2] == 'l') &&
+			(fontName[i+3] == 'I' || fontName[i+3] == 'i') &&
+			(fontName[i+4] == 'Q' || fontName[i+4] == 'q') &&
+			(fontName[i+5] == 'U' || fontName[i+5] == 'u') &&
+			(fontName[i+6] == 'E' || fontName[i+6] == 'e') {
+			italic = true
+			break
+		}
 	}
-	// Underline detection is more complex, often not in font name
-	// For now, set to false; can be enhanced later
+
 	underline = false
 	return
 }
@@ -1421,9 +1465,11 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 }
 
 type contentExtractor struct {
-	page Page
-	text []Text
-	rect []Rect
+	page     Page
+	text     []Text
+	rect     []Rect
+	textCap  int // Track capacity to avoid frequent reallocations
+	growHint int // Hint for next growth size
 }
 
 func (ce *contentExtractor) process(strm Value, resources Value, scope *fontScope, initial gstate) {
@@ -1619,28 +1665,46 @@ func (ce *contentExtractor) appendText(g *gstate, enc TextEncoding, s string) {
 
 	vertical := g.Tf.writingMode() == 1
 
-	// Optimized: batch pre-allocation - extend slice to final size once
+	// Aggressive pre-allocation strategy to minimize reallocations
 	oldLen := len(ce.text)
 	newLen := oldLen + decodedLen
 
-	// Optimized growth strategy: more conservative capacity increase
+	// Only reallocate if necessary
 	if cap(ce.text) < newLen {
-		// Use 25% growth for large slices, 50% for smaller ones
-		// This reduces memory waste while maintaining efficiency
-		extraCap := decodedLen / 4
-		if oldLen < 1000 {
-			extraCap = decodedLen / 2
+		// Use adaptive growth strategy based on usage patterns
+		// For first allocation or small slices: allocate generously
+		// For large slices: grow by 50% + needed space
+		var newCap int
+		if oldLen < 100 {
+			// Small slice: allocate at least 512 to avoid early reallocations
+			newCap = 512
+			if newLen > newCap {
+				newCap = newLen * 2
+			}
+		} else if oldLen < 10000 {
+			// Medium slice: 50% growth
+			newCap = oldLen + oldLen/2 + decodedLen
+		} else {
+			// Large slice: 25% growth to save memory
+			newCap = oldLen + oldLen/4 + decodedLen
 		}
-		if extraCap < 64 {
-			extraCap = 64
+
+		// Use hint from previous growth if available
+		if ce.growHint > 0 && newCap < ce.growHint {
+			newCap = ce.growHint
 		}
-		newCap := newLen + extraCap
+
+		// Allocate new slice - copy is unavoidable but minimize frequency
 		newText := make([]Text, oldLen, newCap)
 		copy(newText, ce.text)
 		ce.text = newText
+		ce.textCap = newCap
+
+		// Update growth hint for next time
+		ce.growHint = newCap + decodedLen*2
 	}
 
-	// Set length to final size - avoid repeated append
+	// Extend slice to final size - avoids repeated append overhead
 	ce.text = ce.text[:newLen]
 
 	// Pre-compute common values outside loop

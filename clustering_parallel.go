@@ -119,12 +119,19 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 	avgFontSize := totalFontSize / float64(n)
 	eps := avgFontSize * 2.0
 
-	// Initialize blocks
+	// Initialize blocks - optimize memory allocation
 	blocks := make([]*TextBlock, n)
 	for i := range texts {
 		t := &texts[i]
 		tb := GetTextBlock()
-		tb.Texts = append(tb.Texts, *t)
+		// Pre-allocate with capacity 1 to avoid append allocation
+		// The pool will reuse this capacity across calls
+		if cap(tb.Texts) < 1 {
+			tb.Texts = make([]Text, 1, 4) // Start with small capacity
+		} else {
+			tb.Texts = tb.Texts[:1]
+		}
+		tb.Texts[0] = *t
 		tb.MinX = t.X
 		tb.MaxX = t.X + t.W
 		tb.MinY = t.Y

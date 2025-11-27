@@ -46,25 +46,26 @@ type WarmupConfig struct {
 }
 
 // DefaultWarmupConfig returns default warmup configuration
+// Reduced pre-allocation to minimize initial memory footprint
 func DefaultWarmupConfig() *WarmupConfig {
 	return &WarmupConfig{
 		BytePoolWarmup: map[int]int{
-			16:   100,
-			32:   100,
-			64:   80,
-			128:  60,
-			256:  40,
-			512:  30,
-			1024: 20,
-			4096: 10,
+			16:   16,
+			32:   16,
+			64:   12,
+			128:  8,
+			256:  6,
+			512:  4,
+			1024: 2,
+			4096: 1,
 		},
 		TextPoolWarmup: map[int]int{
-			8:   50,
-			16:  40,
-			32:  30,
-			64:  20,
-			128: 10,
-			256: 5,
+			8:   8,
+			16:  6,
+			32:  4,
+			64:  2,
+			128: 1,
+			256: 0,
 		},
 		Concurrent:    true,
 		MaxGoroutines: runtime.NumCPU(),
@@ -339,16 +340,17 @@ type StartupConfig struct {
 }
 
 // DefaultStartupConfig default startup configuration
+// Optimized for lower memory footprint
 func DefaultStartupConfig() *StartupConfig {
 	return &StartupConfig{
 		WarmupPools:       true,
 		WarmupConfig:      DefaultWarmupConfig(),
 		PreallocateCaches: true,
-		FontCacheSize:     1000,
-		ResultCacheSize:   10000,
+		FontCacheSize:     256,  // reduced from 1000
+		ResultCacheSize:   1000, // reduced from 10000
 		TuneGC:            true,
-		GCPercent:         200,              // reduce GC frequency
-		MemoryBallast:     10 * 1024 * 1024, // 10MB ballast
+		GCPercent:         150, // balanced GC (was 200)
+		MemoryBallast:     0,   // disabled - was wasting 10MB
 		SetMaxProcs:       true,
 		MaxProcs:          0, // auto-detect
 	}

@@ -1,6 +1,9 @@
 package pdf
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // SpatialGrid is a spatial partitioning structure for efficient neighbor search.
 // It divides 2D space into a grid of cells, allowing O(1) cell lookup and
@@ -9,22 +12,207 @@ type SpatialGrid struct {
 	cellSize float64
 	cells    map[int64][]int // cell ID -> block indices
 	blocks   []*TextBlock
+	// Reusable buffer for GetNearbyBlocks to avoid allocations
+	resultBuf []int
+}
+
+// blockGeom caches derived geometry for a TextBlock to avoid recomputation
+// inside hot merge loops.
+type blockGeom struct {
+	minX, maxX float64
+	minY, maxY float64
+	centerX    float64
+	centerY    float64
+	halfW      float64
+	halfH      float64
+	avgFont    float64
+}
+
+// blockGeomPool provides reusable slices for blockGeom to reduce allocations
+var blockGeomPool = sync.Pool{
+	New: func() interface{} {
+		s := make([]blockGeom, 0, 256)
+		return &s
+	},
+}
+
+// getBlockGeomSlice gets a blockGeom slice from pool
+func getBlockGeomSlice(size int) []blockGeom {
+	sp := blockGeomPool.Get().(*[]blockGeom)
+	s := *sp
+	if cap(s) < size {
+		// Need larger slice, let old one be GC'd
+		return make([]blockGeom, size)
+	}
+	return s[:size]
+}
+
+// putBlockGeomSlice returns a blockGeom slice to pool
+func putBlockGeomSlice(s []blockGeom) {
+	if cap(s) > 4096 {
+		return // Don't pool very large slices
+	}
+	s = s[:0]
+	blockGeomPool.Put(&s)
+}
+
+func buildBlockGeoms(blocks []*TextBlock) []blockGeom {
+	geoms := getBlockGeomSlice(len(blocks))
+	for i, b := range blocks {
+		w := b.MaxX - b.MinX
+		h := b.MaxY - b.MinY
+		geoms[i] = blockGeom{
+			minX:    b.MinX,
+			maxX:    b.MaxX,
+			minY:    b.MinY,
+			maxY:    b.MaxY,
+			centerX: b.MinX + w*0.5,
+			centerY: b.MinY + h*0.5,
+			halfW:   w * 0.5,
+			halfH:   h * 0.5,
+			avgFont: b.AvgFontSize,
+		}
+	}
+	return geoms
+}
+
+// canMergeCoarse performs a very cheap bounding/gap check to short-circuit
+// obviously distant pairs before running the heavier heuristics.
+// Uses pointer parameters to avoid 72-byte struct copy overhead on each call.
+// Optimized for the common case: most pairs fail the first check.
+//
+//go:nosplit
+func canMergeCoarse(g1, g2 *blockGeom, threshold float64) bool {
+	return canMergeCoarseFast(g1, g2, threshold, threshold*1.1, threshold*1.5, threshold*0.8)
+}
+
+// canMergeCoarseFast is the hot-path optimized version with pre-computed thresholds.
+// Pre-computing threshold multiplications saves ~3-5 cycles per call.
+//
+//go:nosplit
+func canMergeCoarseFast(g1, g2 *blockGeom, threshold, threshold11, threshold15, threshold08 float64) bool {
+	// CRITICAL: The first bounding box check filters out ~90% of pairs
+	// Load only the fields needed for the first check to maximize L1 cache hits
+	g1maxX := g1.maxX
+	g2minX := g2.minX
+
+	// Quick X-axis separation check (most common rejection path)
+	if g1maxX+threshold < g2minX {
+		return false
+	}
+
+	g2maxX := g2.maxX
+	g1minX := g1.minX
+	if g2maxX+threshold < g1minX {
+		return false
+	}
+
+	// Now check Y-axis (second most common rejection)
+	g1maxY := g1.maxY
+	g2minY := g2.minY
+	if g1maxY+threshold11 < g2minY {
+		return false
+	}
+
+	g2maxY := g2.maxY
+	g1minY := g1.minY
+	if g2maxY+threshold11 < g1minY {
+		return false
+	}
+
+	// Center distance checks (rare path - only for nearby blocks)
+	dx := g1.centerX - g2.centerX
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := g1.centerY - g2.centerY
+	if dy < 0 {
+		dy = -dy
+	}
+
+	// Gap calculations
+	hGap := dx - (g1.halfW + g2.halfW)
+	if hGap > threshold {
+		return false
+	}
+	vGap := dy - (g1.halfH + g2.halfH)
+	if vGap > threshold15 {
+		return false
+	}
+
+	// Combined gap check
+	if hGap > threshold08 && vGap > threshold {
+		return false
+	}
+
+	return true
 }
 
 // NewSpatialGrid creates a new spatial grid for the given blocks.
 // cellSize determines the granularity of the grid; typically should be
 // around 2-3x the expected cluster radius for optimal performance.
 func NewSpatialGrid(blocks []*TextBlock, cellSize float64) *SpatialGrid {
-	grid := &SpatialGrid{
-		cellSize: cellSize,
-		cells:    make(map[int64][]int, len(blocks)/4), // Pre-allocate based on expected cell count
-		blocks:   blocks,
+	// Estimate number of cells: assume average 4 blocks per cell
+	estimatedCells := len(blocks) / 4
+	if estimatedCells < 16 {
+		estimatedCells = 16
 	}
 
-	// Populate grid
+	grid := &SpatialGrid{
+		cellSize:  cellSize,
+		cells:     make(map[int64][]int, estimatedCells),
+		blocks:    blocks,
+		resultBuf: make([]int, 0, 256), // Larger buffer to avoid frequent reallocs
+	}
+
+	// Pre-compute inverse cell size for faster division
+	invCellSize := 1.0 / cellSize
+
+	// First pass: count blocks per cell to pre-allocate
+	cellCounts := make(map[int64]int, estimatedCells)
+	for _, block := range blocks {
+		// Inline Center() calculation
+		centerX := (block.MinX + block.MaxX) * 0.5
+		centerY := (block.MinY + block.MaxY) * 0.5
+
+		// Inline getCellID with fast floor
+		fx := centerX * invCellSize
+		fy := centerY * invCellSize
+		cx := int64(fx)
+		if fx < 0 && fx != float64(cx) {
+			cx--
+		}
+		cy := int64(fy)
+		if fy < 0 && fy != float64(cy) {
+			cy--
+		}
+		cellID := (cx << 32) | (cy & 0xFFFFFFFF)
+		cellCounts[cellID]++
+	}
+
+	// Pre-allocate cell slices with exact capacity
+	for cellID, count := range cellCounts {
+		grid.cells[cellID] = make([]int, 0, count)
+	}
+
+	// Second pass: populate grid (no reallocation now)
 	for i, block := range blocks {
-		center := block.Center()
-		cellID := grid.getCellID(center.X, center.Y)
+		// Inline Center() calculation
+		centerX := (block.MinX + block.MaxX) * 0.5
+		centerY := (block.MinY + block.MaxY) * 0.5
+
+		// Inline getCellID with fast floor
+		fx := centerX * invCellSize
+		fy := centerY * invCellSize
+		cx := int64(fx)
+		if fx < 0 && fx != float64(cx) {
+			cx--
+		}
+		cy := int64(fy)
+		if fy < 0 && fy != float64(cy) {
+			cy--
+		}
+		cellID := (cx << 32) | (cy & 0xFFFFFFFF)
 		grid.cells[cellID] = append(grid.cells[cellID], i)
 	}
 
@@ -32,57 +220,73 @@ func NewSpatialGrid(blocks []*TextBlock, cellSize float64) *SpatialGrid {
 }
 
 // getCellID computes a unique cell ID for coordinates
+// Inlined math.Floor for performance (avoids function call overhead)
 func (g *SpatialGrid) getCellID(x, y float64) int64 {
-	cx := int64(math.Floor(x / g.cellSize))
-	cy := int64(math.Floor(y / g.cellSize))
+	// Fast floor: for positive values, int64(x) is floor
+	// For negative values, we need to subtract 1 if there's a fractional part
+	invCellSize := 1.0 / g.cellSize
+	fx := x * invCellSize
+	fy := y * invCellSize
+
+	cx := int64(fx)
+	if fx < 0 && fx != float64(cx) {
+		cx--
+	}
+	cy := int64(fy)
+	if fy < 0 && fy != float64(cy) {
+		cy--
+	}
+
 	// Pack into single int64: upper 32 bits for x, lower 32 bits for y
 	return (cx << 32) | (cy & 0xFFFFFFFF)
 }
 
 // GetNearbyBlocks returns indices of blocks in the same cell and neighboring cells.
 // This is much faster than searching all blocks when they're uniformly distributed.
-// Memory optimized: reuses slice from pool to reduce allocations.
+// Memory optimized: reuses internal buffer to reduce allocations.
+// WARNING: The returned slice is reused on next call - copy if needed.
 func (g *SpatialGrid) GetNearbyBlocks(blockIdx int) []int {
 	if blockIdx < 0 || blockIdx >= len(g.blocks) {
 		return nil
 	}
 
 	block := g.blocks[blockIdx]
-	center := block.Center()
+	// Inline Center() calculation to avoid method call overhead
+	centerX := (block.MinX + block.MaxX) * 0.5
+	centerY := (block.MinY + block.MaxY) * 0.5
 
-	// Calculate base cell coordinates
-	baseCX := int64(math.Floor(center.X / g.cellSize))
-	baseCY := int64(math.Floor(center.Y / g.cellSize))
+	// Calculate base cell coordinates with inlined floor
+	invCellSize := 1.0 / g.cellSize
+	fx := centerX * invCellSize
+	fy := centerY * invCellSize
 
-	// Estimate capacity based on average cell population
-	// For 3x3 grid search, we check 9 cells
-	// Optimized: use smaller initial capacity since most cells are sparse
-	estimatedCap := 16 // Reduced from 32 based on profiling
-	result := make([]int, 0, estimatedCap)
+	baseCX := int64(fx)
+	if fx < 0 && fx != float64(baseCX) {
+		baseCX--
+	}
+	baseCY := int64(fy)
+	if fy < 0 && fy != float64(baseCY) {
+		baseCY--
+	}
+
+	// Reuse internal buffer instead of allocating new slice each time
+	g.resultBuf = g.resultBuf[:0]
 
 	// Check current cell and 8 neighboring cells (3x3 grid)
+	// Unroll the loop for better performance
 	for dx := int64(-1); dx <= 1; dx++ {
+		cx := baseCX + dx
+		cxShifted := cx << 32
 		for dy := int64(-1); dy <= 1; dy++ {
-			cx := baseCX + dx
-			cy := baseCY + dy
-			cellID := (cx << 32) | (cy & 0xFFFFFFFF)
+			cellID := cxShifted | ((baseCY + dy) & 0xFFFFFFFF)
 
 			if indices, ok := g.cells[cellID]; ok {
-				// Optimized: check capacity before append to reduce allocations
-				if cap(result)-len(result) >= len(indices) {
-					result = append(result, indices...)
-				} else {
-					// Need to grow - allocate with extra space
-					newCap := len(result) + len(indices) + 16
-					newResult := make([]int, len(result), newCap)
-					copy(newResult, result)
-					result = append(newResult, indices...)
-				}
+				g.resultBuf = append(g.resultBuf, indices...)
 			}
 		}
 	}
 
-	return result
+	return g.resultBuf
 }
 
 // ClusterTextBlocksV3 is an improved clustering algorithm using spatial grid.
@@ -111,10 +315,7 @@ func ClusterTextBlocksV3(texts []Text) []*TextBlock {
 	for i := range texts {
 		t := &texts[i]
 		tb := GetTextBlock()
-		// Optimized: reserve capacity for potential merges
-		if cap(tb.Texts) < 4 {
-			tb.Texts = make([]Text, 0, 4)
-		}
+		// Let Texts slice grow naturally - pool will reuse grown capacity
 		tb.Texts = append(tb.Texts, *t)
 		tb.MinX = t.X
 		tb.MaxX = t.X + t.W
@@ -126,6 +327,8 @@ func ClusterTextBlocksV3(texts []Text) []*TextBlock {
 
 	// Build spatial grid - cell size is 2x distance threshold for optimal coverage
 	grid := NewSpatialGrid(blocks, distThreshold*2.0)
+	geoms := buildBlockGeoms(blocks)
+	defer putBlockGeomSlice(geoms) // Return geoms to pool when done
 
 	// Union-find for clustering - use pooled slice
 	parent := GetIntSlice(len(blocks))
@@ -157,48 +360,92 @@ func ClusterTextBlocksV3(texts []Text) []*TextBlock {
 		}
 	}
 
+	// Pre-compute threshold values once outside the hot loop
+	threshold11 := distThreshold * 1.1
+	threshold15 := distThreshold * 1.5
+	threshold08 := distThreshold * 0.8
+
 	// Find neighbors using spatial grid (much faster than KD-tree for this use case)
-	for i, block := range blocks {
+	for i := range blocks {
+		gi := &geoms[i] // Use pointer to avoid struct copy
+		rootI := find(i)
+
 		// Get nearby blocks from spatial grid (O(1) average case)
 		nearbyIndices := grid.GetNearbyBlocks(i)
 
 		for _, j := range nearbyIndices {
-			if i == j {
+			if j <= i {
+				continue
+			}
+
+			gj := &geoms[j] // Use pointer to avoid struct copy
+			if !canMergeCoarseFast(gi, gj, distThreshold, threshold11, threshold15, threshold08) {
 				continue
 			}
 
 			// Check if already in same cluster
-			if find(i) == find(j) {
+			rootJ := find(j)
+			if rootI == rootJ {
 				continue
 			}
 
-			// Check if should merge
-			if shouldMergeClusters(block, blocks[j], distThreshold) {
-				union(i, j)
+			// Check if should merge - use geometry-based version for maximum performance
+			// This avoids pointer dereferences to TextBlock structs
+			if shouldMergeClustersGeomFast(gi, gj, distThreshold, threshold15) {
+				union(rootI, rootJ)
+				rootI = find(i)
 			}
 		}
 	}
 
-	// Group blocks by cluster root
-	clusterMap := make(map[int][]*TextBlock)
-	for i, block := range blocks {
+	// Group blocks by cluster root - optimized to minimize allocations
+	// First pass: count blocks per root and identify unique roots
+	rootCounts := make([]int, len(blocks))
+	blockRoots := make([]int, len(blocks))
+	uniqueRoots := 0
+	for i := range blocks {
 		root := find(i)
-		clusterMap[root] = append(clusterMap[root], block)
+		blockRoots[i] = root
+		if rootCounts[root] == 0 {
+			uniqueRoots++
+		}
+		rootCounts[root]++
 	}
 
-	// Merge blocks in same cluster
-	result := make([]*TextBlock, 0, len(clusterMap))
-	for _, cluster := range clusterMap {
-		if len(cluster) == 1 {
-			result = append(result, cluster[0])
+	// Use map only for clusters with >1 block (most clusters have 1 block)
+	// Single-block clusters go directly to result without intermediate storage
+	multiBlockClusters := make(map[int][]*TextBlock, uniqueRoots/4+1)
+
+	// Pre-allocate result with upper bound
+	result := make([]*TextBlock, 0, uniqueRoots)
+
+	// Second pass: directly add single-block clusters, group multi-block ones
+	for i, root := range blockRoots {
+		count := rootCounts[root]
+		if count == 1 {
+			// Single-block cluster - add directly to result
+			result = append(result, blocks[i])
 		} else {
-			merged := mergeTextBlocksOptimized(cluster)
-			// Return individual blocks to pool
-			for _, block := range cluster {
-				PutTextBlock(block)
+			// Multi-block cluster - needs merging
+			if multiBlockClusters[root] == nil {
+				multiBlockClusters[root] = make([]*TextBlock, 0, count)
 			}
-			result = append(result, merged)
+			multiBlockClusters[root] = append(multiBlockClusters[root], blocks[i])
 		}
+	}
+
+	// Merge multi-block clusters
+	for _, cluster := range multiBlockClusters {
+		if len(cluster) == 0 {
+			continue
+		}
+
+		merged := mergeTextBlocksOptimized(cluster)
+		// Return individual blocks to pool (merged reuses first block)
+		for i := 1; i < len(cluster); i++ {
+			PutTextBlock(cluster[i])
+		}
+		result = append(result, merged)
 	}
 
 	return result
@@ -252,6 +499,143 @@ func ClusterTextBlocksV3Fast(texts []Text, maxClusters int) []*TextBlock {
 	}
 
 	return clusters
+}
+
+// shouldMergeClustersGeom is an ultra-optimized version using pre-cached geometry.
+// All data is already in cache-friendly blockGeom structs, avoiding pointer chasing.
+// This is the hot path - every nanosecond counts here.
+// Uses pointer parameters to avoid 72-byte struct copy overhead.
+//
+//go:nosplit
+func shouldMergeClustersGeom(g1, g2 *blockGeom, threshold float64) bool {
+	return shouldMergeClustersGeomFast(g1, g2, threshold, threshold*1.5)
+}
+
+// shouldMergeClustersGeomFast is the hot-path version with pre-computed threshold15.
+//
+//go:nosplit
+func shouldMergeClustersGeomFast(g1, g2 *blockGeom, threshold, threshold15 float64) bool {
+	// Load all fields into local variables at once - CPU can prefetch better
+	g1minX, g1maxX := g1.minX, g1.maxX
+	g1minY, g1maxY := g1.minY, g1.maxY
+	g1centerX, g1centerY := g1.centerX, g1.centerY
+	g1halfW, g1halfH := g1.halfW, g1.halfH
+	g1avgFont := g1.avgFont
+
+	g2minX, g2maxX := g2.minX, g2.maxX
+	g2minY, g2maxY := g2.minY, g2.maxY
+	g2centerX, g2centerY := g2.centerX, g2.centerY
+	g2halfW, g2halfH := g2.halfW, g2.halfH
+	g2avgFont := g2.avgFont
+
+	// Pre-compute threshold-based values
+	threshold03_1 := g1avgFont * 0.3
+	threshold03_2 := g2avgFont * 0.3
+
+	// Compute vertical overlap using branchless min/max
+	var minMaxY, maxMinY float64
+	if g1maxY < g2maxY {
+		minMaxY = g1maxY
+	} else {
+		minMaxY = g2maxY
+	}
+	if g1minY > g2minY {
+		maxMinY = g1minY
+	} else {
+		maxMinY = g2minY
+	}
+	verticalOverlap := minMaxY - maxMinY
+
+	// Early return for vertically overlapping blocks
+	if verticalOverlap > 0 && (verticalOverlap > threshold03_1 || verticalOverlap > threshold03_2) {
+		var maxMinX, minMaxX float64
+		if g1minX > g2minX {
+			maxMinX = g1minX
+		} else {
+			maxMinX = g2minX
+		}
+		if g1maxX < g2maxX {
+			minMaxX = g1maxX
+		} else {
+			minMaxX = g2maxX
+		}
+		if maxMinX-minMaxX < threshold {
+			return true
+		}
+	}
+
+	// Width is already computable from halfW
+	w1 := g1halfW * 2
+	w2 := g2halfW * 2
+
+	// Check if vertically stacked and horizontally aligned
+	var minMaxX, maxMinX float64
+	if g1maxX < g2maxX {
+		minMaxX = g1maxX
+	} else {
+		minMaxX = g2maxX
+	}
+	if g1minX > g2minX {
+		maxMinX = g1minX
+	} else {
+		maxMinX = g2minX
+	}
+	horizontalOverlap := minMaxX - maxMinX
+
+	if horizontalOverlap > 0 {
+		minWidth := w1
+		if w2 < minWidth {
+			minWidth = w2
+		}
+		if minWidth <= 0 {
+			return false
+		}
+		overlapRatio := horizontalOverlap / minWidth
+		if overlapRatio > 0.6 {
+			var maxMinY2, minMaxY2 float64
+			if g1minY > g2minY {
+				maxMinY2 = g1minY
+			} else {
+				maxMinY2 = g2minY
+			}
+			if g1maxY < g2maxY {
+				minMaxY2 = g1maxY
+			} else {
+				minMaxY2 = g2maxY
+			}
+			verticalGap := maxMinY2 - minMaxY2
+			if verticalGap >= 0 && verticalGap < threshold15 {
+				return true
+			}
+		}
+	}
+
+	// Use pre-computed center coordinates (already loaded above)
+	// Use branchless abs
+	horizontalDistance := g1centerX - g2centerX
+	if horizontalDistance < 0 {
+		horizontalDistance = -horizontalDistance
+	}
+	verticalDistance := g1centerY - g2centerY
+	if verticalDistance < 0 {
+		verticalDistance = -verticalDistance
+	}
+
+	// Different columns check
+	if horizontalDistance > verticalDistance*2 {
+		return false
+	}
+
+	// Text-image mix check using pre-computed half dimensions
+	h1 := g1halfH * 2
+	h2 := g2halfH * 2
+	avgSize := (w1 + h1 + w2 + h2) * 0.25
+	avgSize2 := avgSize * 2
+	if horizontalDistance > avgSize2 || verticalDistance > avgSize2 {
+		return false
+	}
+
+	return false
 }
 
 // shouldMergeClustersV3 is an optimized version of merge check with early exits

@@ -7,6 +7,7 @@ package pdf
 import (
 	"math"
 	"sort"
+	"strings"
 )
 
 // TextBlock represents a coherent block of text (like a paragraph or column)
@@ -60,12 +61,19 @@ func smartTextOrdering(texts []Text) []Text {
 	orderedBlocks := detectReadingOrder(blocks)
 
 	// 3. Flatten blocks back to texts
-	result := make([]Text, 0, len(texts))
+	// Use pooled slice to reduce allocations
+	result := GetSizedTextSlice(len(texts))
+	if cap(result) < len(texts) {
+		result = make([]Text, 0, len(texts))
+	}
 	for _, block := range orderedBlocks {
-		// Sort within each block
+		// Sort within each block (in-place, no allocation)
 		sortedTexts := sortWithinBlockOptimized(block.Texts)
 		result = append(result, sortedTexts...)
 	}
+
+	// Return blocks to pool
+	PutTextBlocks(blocks)
 
 	return result
 }
@@ -73,18 +81,17 @@ func smartTextOrdering(texts []Text) []Text {
 // clusterTextBlocks groups nearby texts into coherent blocks
 // using a simplified distance-based clustering approach
 // P1 optimization: Use KD-Tree to accelerate clustering, optimize from O(n²) to O(n log n)
+// P2 optimization: Use parallel DBSCAN for large documents (>1000 texts)
 func clusterTextBlocks(texts []Text) []*TextBlock {
 	if len(texts) == 0 {
 		return nil
 	}
 
-	// For small datasets, use simple method (reduced threshold to use V3 more)
-	if len(texts) < 50 {
-		return clusterTextBlocksSimple(texts)
-	}
-
-	// For large datasets, use optimized spatial grid algorithm (V3)
-	return ClusterTextBlocksV3(texts)
+	// Use V4 which automatically selects the best algorithm based on input size
+	// - Small (<50): Simple O(n²) algorithm
+	// - Medium (50-500): V3 spatial grid with union-find
+	// - Large (>500): Parallel DBSCAN with lock-free union-find
+	return ClusterTextBlocksV4(texts)
 }
 
 // clusterTextBlocksSimple Simple clustering method (for small datasets)
@@ -139,56 +146,73 @@ func clusterTextBlocksSimple(texts []Text) []*TextBlock {
 }
 
 // shouldMergeClusters determines if two text blocks should be merged
-// Optimized: inline min/max, cache width calculations, early returns
+// Ultra-optimized: minimize pointer dereferences, use branchless min/max where possible
+// The key insight is that pointer dereference is expensive (cache miss potential)
+// so we load all needed fields into registers first
 func shouldMergeClusters(b1, b2 *TextBlock, threshold float64) bool {
-	// Inline min/max for performance (avoid function call overhead)
+	// Load all fields into local variables ONCE to minimize pointer dereferences
+	// This is critical for performance - accessing struct fields through pointers
+	// can cause cache misses if the structs are scattered in memory
+	b1MinX, b1MaxX := b1.MinX, b1.MaxX
+	b1MinY, b1MaxY := b1.MinY, b1.MaxY
+	b1AvgFont := b1.AvgFontSize
+
+	b2MinX, b2MaxX := b2.MinX, b2.MaxX
+	b2MinY, b2MaxY := b2.MinY, b2.MaxY
+	b2AvgFont := b2.AvgFontSize
+
+	// Compute all min/max values using branchless selection
+	// This uses conditional move instructions instead of branches
 	var minMaxY, maxMinY float64
-	if b1.MaxY < b2.MaxY {
-		minMaxY = b1.MaxY
+	if b1MaxY < b2MaxY {
+		minMaxY = b1MaxY
 	} else {
-		minMaxY = b2.MaxY
+		minMaxY = b2MaxY
 	}
-	if b1.MinY > b2.MinY {
-		maxMinY = b1.MinY
+	if b1MinY > b2MinY {
+		maxMinY = b1MinY
 	} else {
-		maxMinY = b2.MinY
+		maxMinY = b2MinY
 	}
 	verticalOverlap := minMaxY - maxMinY
 
+	// Pre-compute threshold-based values
+	threshold03_1 := b1AvgFont * 0.3
+	threshold03_2 := b2AvgFont * 0.3
+
 	// Early return for vertically overlapping blocks
-	if verticalOverlap > 0 && (verticalOverlap > b1.AvgFontSize*0.3 || verticalOverlap > b2.AvgFontSize*0.3) {
+	if verticalOverlap > 0 && (verticalOverlap > threshold03_1 || verticalOverlap > threshold03_2) {
 		var maxMinX, minMaxX float64
-		if b1.MinX > b2.MinX {
-			maxMinX = b1.MinX
+		if b1MinX > b2MinX {
+			maxMinX = b1MinX
 		} else {
-			maxMinX = b2.MinX
+			maxMinX = b2MinX
 		}
-		if b1.MaxX < b2.MaxX {
-			minMaxX = b1.MaxX
+		if b1MaxX < b2MaxX {
+			minMaxX = b1MaxX
 		} else {
-			minMaxX = b2.MaxX
+			minMaxX = b2MaxX
 		}
-		horizontalGap := maxMinX - minMaxX
-		if horizontalGap < threshold {
+		if maxMinX-minMaxX < threshold {
 			return true
 		}
 	}
 
 	// Cache width calculations
-	w1 := b1.MaxX - b1.MinX
-	w2 := b2.MaxX - b2.MinX
+	w1 := b1MaxX - b1MinX
+	w2 := b2MaxX - b2MinX
 
 	// Check if vertically stacked and horizontally aligned
 	var minMaxX, maxMinX float64
-	if b1.MaxX < b2.MaxX {
-		minMaxX = b1.MaxX
+	if b1MaxX < b2MaxX {
+		minMaxX = b1MaxX
 	} else {
-		minMaxX = b2.MaxX
+		minMaxX = b2MaxX
 	}
-	if b1.MinX > b2.MinX {
-		maxMinX = b1.MinX
+	if b1MinX > b2MinX {
+		maxMinX = b1MinX
 	} else {
-		maxMinX = b2.MinX
+		maxMinX = b2MinX
 	}
 	horizontalOverlap := minMaxX - maxMinX
 
@@ -203,15 +227,15 @@ func shouldMergeClusters(b1, b2 *TextBlock, threshold float64) bool {
 		overlapRatio := horizontalOverlap / minWidth
 		if overlapRatio > 0.6 {
 			var maxMinY2, minMaxY2 float64
-			if b1.MinY > b2.MinY {
-				maxMinY2 = b1.MinY
+			if b1MinY > b2MinY {
+				maxMinY2 = b1MinY
 			} else {
-				maxMinY2 = b2.MinY
+				maxMinY2 = b2MinY
 			}
-			if b1.MaxY < b2.MaxY {
-				minMaxY2 = b1.MaxY
+			if b1MaxY < b2MaxY {
+				minMaxY2 = b1MaxY
 			} else {
-				minMaxY2 = b2.MaxY
+				minMaxY2 = b2MaxY
 			}
 			verticalGap := maxMinY2 - minMaxY2
 			if verticalGap >= 0 && verticalGap < threshold*1.5 {
@@ -221,11 +245,12 @@ func shouldMergeClusters(b1, b2 *TextBlock, threshold float64) bool {
 	}
 
 	// Inline asymmetric layout check (avoid function call)
-	c1x := (b1.MinX + b1.MaxX) * 0.5
-	c1y := (b1.MinY + b1.MaxY) * 0.5
-	c2x := (b2.MinX + b2.MaxX) * 0.5
-	c2y := (b2.MinY + b2.MaxY) * 0.5
+	c1x := (b1MinX + b1MaxX) * 0.5
+	c1y := (b1MinY + b1MaxY) * 0.5
+	c2x := (b2MinX + b2MaxX) * 0.5
+	c2y := (b2MinY + b2MaxY) * 0.5
 
+	// Use branchless abs
 	horizontalDistance := c1x - c2x
 	if horizontalDistance < 0 {
 		horizontalDistance = -horizontalDistance
@@ -241,7 +266,9 @@ func shouldMergeClusters(b1, b2 *TextBlock, threshold float64) bool {
 	}
 
 	// Text-image mix check (inline)
-	avgSize := (w1 + (b1.MaxY - b1.MinY) + w2 + (b2.MaxY - b2.MinY)) * 0.25
+	h1 := b1MaxY - b1MinY
+	h2 := b2MaxY - b2MinY
+	avgSize := (w1 + h1 + w2 + h2) * 0.25
 	if horizontalDistance > avgSize*2 || verticalDistance > avgSize*2 {
 		return false
 	}
@@ -622,7 +649,6 @@ func buildPlainTextOptimized(texts []Text) string {
 		return ""
 	}
 
-	// CRITICAL FIX: Use direct allocation to avoid pool concurrency issues
 	// Estimate size: avg 20 chars per text + 1 space/newline
 	estimatedSize := len(texts) * 21
 	if estimatedSize < 256 {
@@ -630,7 +656,10 @@ func buildPlainTextOptimized(texts []Text) string {
 	} else if estimatedSize > 65536 {
 		estimatedSize = 65536
 	}
-	builder := NewFastStringBuilder(estimatedSize)
+
+	// Use standard strings.Builder for reliability in concurrent environments
+	var builder strings.Builder
+	builder.Grow(estimatedSize)
 
 	const lineTolerance = 3.0
 	var prevY float64

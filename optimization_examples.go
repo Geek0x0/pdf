@@ -16,9 +16,9 @@ import (
 // Object pool for reusing search result slices, reducing memory allocation
 var resultPool = sync.Pool{
 	New: func() interface{} {
-		// Increased to 2048 to handle larger search results without reallocation
-		// Analysis shows many searches return 500-1500 results
-		return make([]*TextBlock, 0, 2048)
+		// Reduced from 2048 to 256 to minimize initial memory footprint
+		// Pool will grow naturally if larger slices are needed
+		return make([]*TextBlock, 0, 256)
 	},
 }
 
@@ -1141,6 +1141,7 @@ func ClusterTextBlocksOptimizedV2(texts []Text) []*TextBlock {
 }
 
 // mergeTextBlocksOptimized merges blocks with better memory efficiency
+// Uses pool-backed slice allocation to reduce GC pressure
 func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
 	if len(blocks) == 0 {
 		return nil
@@ -1149,7 +1150,7 @@ func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
 		return blocks[0]
 	}
 
-	// Calculate total text count
+	// Calculate total text count for pre-allocation
 	totalTexts := 0
 	for _, block := range blocks {
 		totalTexts += len(block.Texts)
@@ -1157,17 +1158,22 @@ func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
 
 	// Reuse first block as merged result
 	merged := blocks[0]
+	existingLen := len(merged.Texts)
+
+	// Only allocate if capacity is insufficient
 	if cap(merged.Texts) < totalTexts {
-		merged.Texts = make([]Text, 0, totalTexts)
+		// Get a pooled slice with sufficient capacity
+		newTexts := GetTextSlice(totalTexts)
+		// Copy existing texts
+		copy(newTexts[:existingLen], merged.Texts)
+		merged.Texts = newTexts[:existingLen]
 	}
 
-	totalFontSize := 0.0
-	for _, block := range blocks {
-		if block == merged && len(merged.Texts) > 0 {
-			// Already have first block's texts
-			totalFontSize += block.AvgFontSize * float64(len(block.Texts))
-			continue
-		}
+	totalFontSize := merged.AvgFontSize * float64(existingLen)
+
+	// Append texts from other blocks - merged.Texts already has enough capacity
+	for i := 1; i < len(blocks); i++ {
+		block := blocks[i]
 		merged.Texts = append(merged.Texts, block.Texts...)
 		if block.MinX < merged.MinX {
 			merged.MinX = block.MinX
@@ -1182,11 +1188,6 @@ func mergeTextBlocksOptimized(blocks []*TextBlock) *TextBlock {
 			merged.MaxY = block.MaxY
 		}
 		totalFontSize += block.AvgFontSize * float64(len(block.Texts))
-
-		// Return non-first blocks to pool
-		if block != merged {
-			PutTextBlock(block)
-		}
 	}
 
 	if totalTexts > 0 {

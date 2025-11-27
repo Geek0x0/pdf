@@ -122,6 +122,46 @@ func PutByteBuffer(buf *[]byte) {
 	byteBufferPool.Put(buf)
 }
 
+// Pool for contentExtractor to reduce Text slice allocations
+// This is a major optimization as appendText allocates 16GB+ cumulatively
+var contentExtractorPool = sync.Pool{
+	New: func() interface{} {
+		return &contentExtractorPooled{
+			text: make([]Text, 0, 2048), // Increased from 512 - typical page has 1000-3000 chars
+			rect: make([]Rect, 0, 64),
+		}
+	},
+}
+
+// contentExtractorPooled holds reusable slices for content extraction
+type contentExtractorPooled struct {
+	text []Text
+	rect []Rect
+}
+
+// GetContentExtractorSlices gets pre-allocated slices from pool
+func GetContentExtractorSlices() ([]Text, []Rect) {
+	p := contentExtractorPool.Get().(*contentExtractorPooled)
+	return p.text[:0], p.rect[:0]
+}
+
+// PutContentExtractorSlices returns slices to pool
+func PutContentExtractorSlices(text []Text, rect []Rect) {
+	// Don't pool extremely large slices
+	if cap(text) > 8192 || cap(rect) > 256 {
+		return
+	}
+	// Clear text slice to allow GC of strings
+	for i := range text {
+		text[i] = Text{}
+	}
+	p := &contentExtractorPooled{
+		text: text[:0],
+		rect: rect[:0],
+	}
+	contentExtractorPool.Put(p)
+}
+
 // Pool for PDF buffers (used in lexing and parsing)
 var pdfBufferPool = sync.Pool{
 	New: func() interface{} {

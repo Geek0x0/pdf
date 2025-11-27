@@ -1405,7 +1405,9 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 		return Content{}, nil
 	}
 
-	extractor := contentExtractor{page: p}
+	// Use pooled slices to reduce allocations in appendText
+	textSlice, rectSlice := GetContentExtractorSlices()
+	extractor := contentExtractor{page: p, text: textSlice, rect: rectSlice}
 	scope = p.buildFontScope(p.Resources(), fonts, nil)
 	initial := gstate{
 		Th:  1,
@@ -1413,6 +1415,8 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 	}
 	extractor.process(p.V.Key("Contents"), p.Resources(), scope, initial)
 	content = Content{extractor.text, extractor.rect}
+	// Note: we don't return slices to pool here because they're now owned by Content
+	// The caller should call PutContentExtractorSlices when done if needed
 	return content, err
 }
 

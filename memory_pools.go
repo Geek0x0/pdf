@@ -12,12 +12,14 @@ import (
 // Reduces GC pressure by reusing TextBlock objects
 
 // textBlockPool provides reusable TextBlock objects
+// Note: Do NOT pre-allocate Texts slice capacity here.
+// The pool reuses objects, so pre-allocation only wastes memory on first use.
+// After first use, the slice will have grown capacity that gets reused.
 var textBlockPool = sync.Pool{
 	New: func() interface{} {
 		return &TextBlock{
-			// Optimized: smaller initial capacity to reduce memory waste
-			// Most blocks start with 1 text and grow organically
-			Texts: make([]Text, 0, 4), // Reduced from 16
+			// Start with nil slice - it will grow as needed and be reused
+			Texts: nil,
 		}
 	},
 }
@@ -25,7 +27,10 @@ var textBlockPool = sync.Pool{
 // GetTextBlock gets a TextBlock from pool
 func GetTextBlock() *TextBlock {
 	tb := textBlockPool.Get().(*TextBlock)
-	tb.Texts = tb.Texts[:0]
+	// Safe reset - nil slice is valid for append
+	if tb.Texts != nil {
+		tb.Texts = tb.Texts[:0]
+	}
 	tb.MinX = 0
 	tb.MaxX = 0
 	tb.MinY = 0
@@ -43,7 +48,9 @@ func PutTextBlock(tb *TextBlock) {
 	if cap(tb.Texts) > 1024 {
 		return
 	}
-	tb.Texts = tb.Texts[:0]
+	if tb.Texts != nil {
+		tb.Texts = tb.Texts[:0]
+	}
 	textBlockPool.Put(tb)
 }
 
@@ -116,6 +123,9 @@ func PutIntSlice(s []int) {
 var (
 	stringInternPool  = sync.Map{}
 	singleCharStrings [256]string
+	// Pre-allocate common CJK and Unicode characters
+	commonUnicodeStrings = make(map[rune]string, 8192)
+	unicodeInitOnce      sync.Once
 )
 
 func init() {
@@ -124,15 +134,48 @@ func init() {
 	}
 }
 
+// initCommonUnicode pre-allocates strings for common Unicode ranges
+func initCommonUnicode() {
+	// Common CJK Unified Ideographs (most frequently used Chinese characters)
+	// Range: U+4E00 to U+9FFF (20,992 characters, but we only pre-alloc common ones)
+	// Only allocate the most common ~3000 characters to balance memory vs allocation
+	commonRanges := [][2]rune{
+		{0x4E00, 0x5200}, // Common CJK block 1 (~512 chars)
+		{0x5200, 0x5600}, // Common CJK block 2
+		{0x5600, 0x5A00}, // Common CJK block 3
+		{0x5A00, 0x5E00}, // Common CJK block 4
+		{0x5E00, 0x6200}, // Common CJK block 5
+		{0x6200, 0x6600}, // Common CJK block 6
+		{0x3000, 0x3100}, // CJK Symbols and Punctuation
+		{0xFF00, 0xFF70}, // Fullwidth ASCII variants
+		{0x2000, 0x2070}, // General Punctuation
+	}
+	for _, r := range commonRanges {
+		for c := r[0]; c < r[1]; c++ {
+			commonUnicodeStrings[c] = string(c)
+		}
+	}
+}
+
 // InternRune converts a rune to interned string
 func InternRune(r rune) string {
 	if r < 256 {
 		return singleCharStrings[byte(r)]
 	}
-	s := string(r)
-	if interned, ok := stringInternPool.Load(s); ok {
+
+	// Lazy init common Unicode characters
+	unicodeInitOnce.Do(initCommonUnicode)
+
+	// Check pre-allocated common Unicode
+	if s, ok := commonUnicodeStrings[r]; ok {
+		return s
+	}
+
+	// Fallback to sync.Map for other characters
+	if interned, ok := stringInternPool.Load(r); ok {
 		return interned.(string)
 	}
-	stringInternPool.Store(s, s)
+	s := string(r)
+	stringInternPool.Store(r, s)
 	return s
 }

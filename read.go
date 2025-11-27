@@ -2409,7 +2409,15 @@ var passwordPad = []byte{
 
 func (r *Reader) initEncrypt(password string) error {
 	// See PDF 32000-1:2008, §7.6.
-	encrypt, _ := r.resolve(objptr{}, r.trailer["Encrypt"]).data.(dict)
+	encryptVal := r.resolve(objptr{}, r.trailer["Encrypt"])
+	encrypt, ok := encryptVal.data.(dict)
+	if !ok || len(encrypt) == 0 {
+		// Cannot resolve Encrypt dictionary - this typically happens when:
+		// 1. The xref table is corrupted and cannot locate the Encrypt object
+		// 2. The Encrypt reference points to a non-existent object
+		// 3. The object at the Encrypt reference is not a dictionary
+		return fmt.Errorf("malformed PDF: cannot resolve Encrypt dictionary (xref may be corrupted)")
+	}
 	if encrypt["Filter"] != name("Standard") {
 		return fmt.Errorf("unsupported PDF: encryption filter %v", objfmt(encrypt["Filter"]))
 	}

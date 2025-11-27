@@ -61,6 +61,56 @@ func BenchmarkClusterV3vsPV2(b *testing.B) {
 	}
 }
 
+func BenchmarkCanMergeCoarse(b *testing.B) {
+	// prepare a set of geometries
+	n := 10000
+	texts := genTextsForParallel(n, 123)
+	blocks := make([]*TextBlock, n)
+	for i := range texts {
+		t := &texts[i]
+		tb := GetTextBlock()
+		tb.Texts = append(tb.Texts, *t)
+		tb.MinX = t.X
+		tb.MaxX = t.X + t.W
+		tb.MinY = t.Y
+		tb.MaxY = t.Y + t.FontSize
+		tb.AvgFontSize = t.FontSize
+		blocks[i] = tb
+	}
+	geoms := buildBlockGeoms(blocks)
+	defer putBlockGeomSlice(geoms)
+
+	b.Run("ScalarPair", func(b *testing.B) {
+		b.ReportAllocs()
+		out := make([]bool, 0, 16)
+		for i := 0; i < b.N; i++ {
+			// compare first element vs next 128 neighbors
+			g1 := &geoms[0]
+			for j := 1; j < 129 && j < len(geoms); j++ {
+				_ = canMergeCoarseFast(g1, &geoms[j], g1.avgFont*2.0, g1.avgFont*2.0*1.1, g1.avgFont*2.0*1.5, g1.avgFont*2.0*0.8)
+			}
+			_ = out
+		}
+	})
+
+	b.Run("BatchScalar", func(b *testing.B) {
+		b.ReportAllocs()
+		batch := make([]blockGeom, 0, 128)
+		for j := 1; j < 129 && j < len(geoms); j++ {
+			batch = append(batch, geoms[j])
+		}
+		out := make([]bool, len(batch))
+		for i := 0; i < b.N; i++ {
+			canMergeCoarseBatchScalar(&geoms[0], batch, geoms[0].avgFont*2.0, geoms[0].avgFont*2.0*1.1, geoms[0].avgFont*2.0*1.5, geoms[0].avgFont*2.0*0.8, out)
+		}
+		_ = out
+	})
+
+	for _, blk := range blocks {
+		PutTextBlock(blk)
+	}
+}
+
 func itoa2(n int) string {
 	if n >= 1000 {
 		return itoa3(n/1000) + "k"

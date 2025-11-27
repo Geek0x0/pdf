@@ -148,6 +148,126 @@ func canMergeCoarseFast(g1, g2 *blockGeom, threshold, threshold11, threshold15, 
 	return true
 }
 
+// canMergeCoarseBatchScalar performs the same coarse merge test as
+// canMergeCoarseFast but operates on a batch of g2 geometries against
+// a single g1. This is a scalar, loop-unrolled friendly version that
+// allows later replacement with assembly SIMD implementations.
+// Inputs are slices of preloaded blockGeom values for g2.
+func canMergeCoarseBatchScalar(g1 *blockGeom, g2s []blockGeom, threshold, threshold11, threshold15, threshold08 float64, out []bool) {
+	// Ensure out has enough capacity
+	if len(out) < len(g2s) {
+		panic("out slice too small")
+	}
+
+	// Load g1 fields
+	g1maxX := g1.maxX
+	g1minX := g1.minX
+	g1maxY := g1.maxY
+	g1minY := g1.minY
+	g1centerX := g1.centerX
+	g1centerY := g1.centerY
+	g1halfW := g1.halfW
+	g1halfH := g1.halfH
+
+	for i := 0; i < len(g2s); i++ {
+		g2 := &g2s[i]
+		// Quick X-axis separation
+		if g1maxX+threshold < g2.minX {
+			out[i] = false
+			continue
+		}
+		if g2.maxX+threshold < g1minX {
+			out[i] = false
+			continue
+		}
+
+		// Y-axis checks
+		if g1maxY+threshold11 < g2.minY {
+			out[i] = false
+			continue
+		}
+		if g2.maxY+threshold11 < g1minY {
+			out[i] = false
+			continue
+		}
+
+		// Center distance checks
+		dx := g1centerX - g2.centerX
+		if dx < 0 {
+			dx = -dx
+		}
+		dy := g1centerY - g2.centerY
+		if dy < 0 {
+			dy = -dy
+		}
+
+		hGap := dx - (g1halfW + g2.halfW)
+		if hGap > threshold {
+			out[i] = false
+			continue
+		}
+		vGap := dy - (g1halfH + g2.halfH)
+		if vGap > threshold15 {
+			out[i] = false
+			continue
+		}
+
+		if hGap > threshold08 && vGap > threshold {
+			out[i] = false
+			continue
+		}
+
+		out[i] = true
+	}
+}
+
+// canMergeCoarseBatchAuto dispatches to an AVX2 implementation when
+// available, otherwise it falls back to the scalar batch implementation.
+// It processes g2s and writes results into out (must be at least len(g2s)).
+func canMergeCoarseBatchAuto(g1 *blockGeom, g2s []blockGeom, threshold, threshold11, threshold15, threshold08 float64, out []bool) {
+	if len(out) < len(g2s) {
+		panic("out slice too small")
+	}
+
+	// If AVX2 available and at least 4 elements, use the vector path.
+	if hasAVX2() && len(g2s) >= 4 {
+		// process in groups of 4
+		var aMinX, aMaxX, aMinY, aMaxY [4]float64
+		var bMinX, bMaxX, bMinY, bMaxY [4]float64
+
+		i := 0
+		for ; i+4 <= len(g2s); i += 4 {
+			// g1 fields replicated
+			for k := 0; k < 4; k++ {
+				aMinX[k] = g1.minX
+				aMaxX[k] = g1.maxX
+				aMinY[k] = g1.minY
+				aMaxY[k] = g1.maxY
+
+				bMinX[k] = g2s[i+k].minX
+				bMaxX[k] = g2s[i+k].maxX
+				bMinY[k] = g2s[i+k].minY
+				bMaxY[k] = g2s[i+k].maxY
+			}
+
+			mask := canMergeCoarseBatchAVX(&aMinX, &aMaxX, &aMinY, &aMaxY, &bMinX, &bMaxX, &bMinY, &bMaxY, threshold)
+			// mask's lowest 4 bits correspond to lanes
+			for k := 0; k < 4; k++ {
+				out[i+k] = (mask&(1<<uint(k)) != 0)
+			}
+		}
+
+		// leftover
+		if i < len(g2s) {
+			canMergeCoarseBatchScalar(g1, g2s[i:], threshold, threshold11, threshold15, threshold08, out[i:])
+		}
+		return
+	}
+
+	// Fallback to scalar batch
+	canMergeCoarseBatchScalar(g1, g2s, threshold, threshold11, threshold15, threshold08, out)
+}
+
 // NewSpatialGrid creates a new spatial grid for the given blocks.
 // cellSize determines the granularity of the grid; typically should be
 // around 2-3x the expected cluster radius for optimal performance.

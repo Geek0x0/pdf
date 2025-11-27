@@ -9,24 +9,24 @@ import (
 func TestContextAwareClassification(t *testing.T) {
 	// Create test text elements that simulate different contexts
 	texts := []Text{
-		{S: "Introduction", X: 100, Y: 700, FontSize: 16}, // Likely title
+		{S: "Introduction", X: 100, Y: 700, FontSize: 16},                           // Likely title
 		{S: "This is the beginning of the document.", X: 100, Y: 680, FontSize: 12}, // Likely paragraph
-		{S: "Figure 1: Sample Chart", X: 200, Y: 600, FontSize: 10}, // Likely caption
-		{S: "1. First item", X: 100, Y: 580, FontSize: 12}, // Likely list
-		{S: "1.1 Sub-item", X: 120, Y: 560, FontSize: 12}, // Likely list
+		{S: "Figure 1: Sample Chart", X: 200, Y: 600, FontSize: 10},                 // Likely caption
+		{S: "1. First item", X: 100, Y: 580, FontSize: 12},                          // Likely list
+		{S: "1.1 Sub-item", X: 120, Y: 560, FontSize: 12},                           // Likely list
 	}
 
 	pageWidth := 600.0
 	pageHeight := 800.0
 
 	classifier := NewTextClassifier(texts, pageWidth, pageHeight)
-	
+
 	if classifier.spatialIndex == nil {
 		t.Error("Expected spatial index to be created, but it was nil")
 	}
 
 	blocks := classifier.ClassifyBlocks()
-	
+
 	if len(blocks) != 5 {
 		t.Errorf("Expected 5 blocks, got %d", len(blocks))
 	}
@@ -41,7 +41,7 @@ func TestContextAwareClassification(t *testing.T) {
 			}
 		}
 	}
-	
+
 	if !titleFound {
 		t.Error("Expected to find 'Introduction' as a title block")
 	}
@@ -53,7 +53,7 @@ func TestContextAwareClassification(t *testing.T) {
 			captionFound = true
 		}
 	}
-	
+
 	if !captionFound {
 		t.Error("Expected to find 'Figure 1: Sample Chart' as a caption block")
 	}
@@ -65,7 +65,7 @@ func TestContextAwareClassification(t *testing.T) {
 			listCount++
 		}
 	}
-	
+
 	if listCount < 2 {
 		t.Errorf("Expected at least 2 list items, got %d", listCount)
 	}
@@ -75,10 +75,10 @@ func TestContextAwareClassification(t *testing.T) {
 func TestContextAwareClassificationWithContext(t *testing.T) {
 	// Create test text elements with clear context
 	texts := []Text{
-		{S: "Main Title", X: 100, Y: 700, FontSize: 20}, // Large font = title
-		{S: "Subtitle", X: 100, Y: 680, FontSize: 14},    // Medium font = subtitle
+		{S: "Main Title", X: 100, Y: 700, FontSize: 20},                   // Large font = title
+		{S: "Subtitle", X: 100, Y: 680, FontSize: 14},                     // Medium font = subtitle
 		{S: "Regular text paragraph here.", X: 100, Y: 660, FontSize: 12}, // Regular = paragraph
-		{S: "Another paragraph", X: 100, Y: 640, FontSize: 12}, // Regular = paragraph
+		{S: "Another paragraph", X: 100, Y: 640, FontSize: 12},            // Regular = paragraph
 	}
 
 	pageWidth := 600.0
@@ -86,7 +86,7 @@ func TestContextAwareClassificationWithContext(t *testing.T) {
 
 	classifier := NewTextClassifier(texts, pageWidth, pageHeight)
 	blocks := classifier.ClassifyBlocks()
-	
+
 	if len(blocks) != 4 {
 		t.Errorf("Expected 4 blocks, got %d", len(blocks))
 	}
@@ -95,7 +95,7 @@ func TestContextAwareClassificationWithContext(t *testing.T) {
 	titleCount := 0
 	subtitleCount := 0
 	paragraphCount := 0
-	
+
 	for _, block := range blocks {
 		switch block.Type {
 		case BlockTitle:
@@ -111,11 +111,11 @@ func TestContextAwareClassificationWithContext(t *testing.T) {
 			subtitleCount++
 		}
 	}
-	
+
 	if titleCount < 1 {
 		t.Error("Expected at least 1 title block")
 	}
-	
+
 	if paragraphCount < 2 {
 		t.Errorf("Expected at least 2 paragraph blocks, got %d", paragraphCount)
 	}
@@ -130,7 +130,7 @@ func TestContextAwareClassificationNoContext(t *testing.T) {
 
 	classifier := NewTextClassifier(texts, pageWidth, pageHeight)
 	blocks := classifier.ClassifyBlocks()
-	
+
 	if len(blocks) != 0 {
 		t.Errorf("Expected 0 blocks for empty text, got %d", len(blocks))
 	}
@@ -141,14 +141,14 @@ func TestTextClassifierGetContext(t *testing.T) {
 	texts := []Text{
 		{S: "Main content", X: 100, Y: 700, FontSize: 12, W: 20},
 		{S: "Caption text", X: 120, Y: 650, FontSize: 10, W: 15}, // Close to main content
-		{S: "Footnote", X: 100, Y: 100, FontSize: 8, W: 10},     // Far away
+		{S: "Footnote", X: 100, Y: 100, FontSize: 8, W: 10},      // Far away
 	}
 
 	pageWidth := 600.0
 	pageHeight := 800.0
 
 	classifier := NewTextClassifier(texts, pageWidth, pageHeight)
-	
+
 	// Create a mock TextBlock to test context retrieval
 	cluster := &TextBlock{
 		Texts:       []Text{texts[0]},
@@ -160,7 +160,7 @@ func TestTextClassifierGetContext(t *testing.T) {
 	}
 
 	context := classifier.getContext(cluster)
-	
+
 	// Should find the "Caption text" as context, but not "Footnote" (too far)
 	if len(context) == 0 {
 		t.Log("No context found - this is expected if spatial index isn't working properly")
@@ -173,7 +173,7 @@ func TestIsFootnoteReference(t *testing.T) {
 		captionPattern: regexp.MustCompile(`^(Figure|Table|Fig\.|Tab\.)\s+\d+`),
 		listPattern:    regexp.MustCompile(`^(\d+\.|[•\-\*]|\([a-z]\)|\([0-9]+\))\s`),
 	}
-	
+
 	testCases := []struct {
 		text     string
 		expected bool
@@ -187,7 +187,7 @@ func TestIsFootnoteReference(t *testing.T) {
 		{"abc", false, "Regular text"},
 		{"not a ref", false, "Non-reference text"},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := textClassifier.isFootnoteReference(tc.text)
@@ -201,7 +201,7 @@ func TestIsFootnoteReference(t *testing.T) {
 // TestIsLikelyParagraph tests paragraph detection
 func TestIsLikelyParagraph(t *testing.T) {
 	textClassifier := &TextClassifier{}
-	
+
 	testCases := []struct {
 		text     Text
 		expected bool
@@ -213,7 +213,7 @@ func TestIsLikelyParagraph(t *testing.T) {
 		{Text{S: ""}, false, "Empty text"},
 		{Text{S: "One"}, false, "Single word"},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			result := textClassifier.isLikelyParagraph(tc.text)

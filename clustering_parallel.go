@@ -177,6 +177,11 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 			// Each worker needs its own result buffer for grid queries
 			localResultBuf := make([]int, 0, 256)
 
+			// Reusable batch buffers to avoid allocations inside hot loop
+			batchIdx := make([]int, 0, 16)
+			batchGeoms := make([]blockGeom, 0, 16)
+			out := make([]bool, 16)
+
 			for i := start; i < end; i++ {
 				gi := &geoms[i]
 
@@ -196,16 +201,40 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 					}
 				}
 
-				for _, j := range localResultBuf {
-					if j <= i {
+				// collect up to 16 neighbors into batchIdx
+				batchIdx = batchIdx[:0]
+				for _, jj := range localResultBuf {
+					if jj <= i {
 						continue
 					}
+					batchIdx = append(batchIdx, jj)
+					if len(batchIdx) >= cap(batchIdx) {
+						break
+					}
+				}
 
+				if len(batchIdx) == 0 {
+					continue
+				}
+
+				// prepare geoms batch (resize preserving capacity)
+				batchGeoms = batchGeoms[:len(batchIdx)]
+				for k := range batchIdx {
+					batchGeoms[k] = geoms[batchIdx[k]]
+				}
+
+				// ensure out slice length equals batch
+				out = out[:len(batchGeoms)]
+
+				// coarse filter using AVX2 or scalar batch
+				canMergeCoarseBatchAuto(gi, batchGeoms, eps, eps11, eps15, eps08, out)
+
+				for k, ok := range out {
+					if !ok {
+						continue
+					}
+					j := batchIdx[k]
 					gj := &geoms[j]
-					if !canMergeCoarseFast(gi, gj, eps, eps11, eps15, eps08) {
-						continue
-					}
-
 					if shouldMergeClustersGeomFast(gi, gj, eps, eps15) {
 						localEdges = append(localEdges, edgePair{int32(i), int32(j)})
 					}

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -24,7 +25,7 @@ func main() {
 	page := r.Page(1)
 
 	start := time.Now()
-	text, err := page.OptimizedGetPlainText(nil)
+	text, err := page.OptimizedGetPlainText(context.Background(), nil)
 	if err != nil {
 		log.Fatal(err)
 	}

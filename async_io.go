@@ -84,7 +84,7 @@ func (ar *AsyncReader) AsyncExtractText(ctx context.Context) (<-chan string, <-c
 				}
 
 				page := ar.Page(pageNum)
-				text, err := page.GetPlainText(nil)
+				text, err := page.GetPlainText(context.Background(), nil)
 
 				// Use select to ensure no blocking
 				select {
@@ -249,7 +249,7 @@ func (ar *AsyncReader) AsyncExtractTextWithContext(ctx context.Context, opts Ext
 					}
 
 					page := ar.Page(pageNum)
-					text, err := page.GetPlainText(nil)
+					text, err := page.GetPlainText(context.Background(), nil)
 
 					// Use select to ensure no blocking
 					select {

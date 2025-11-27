@@ -43,7 +43,7 @@ func TestPageGetPlainText(t *testing.T) {
 	}
 
 	page := r.Page(1)
-	text, err := page.GetPlainText(nil)
+	text, err := page.GetPlainText(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Page.GetPlainText failed: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestEmptyPage(t *testing.T) {
 
 	// Try to get a page beyond the range
 	page := r.Page(r.NumPage() + 100)
-	text, err := page.GetPlainText(nil)
+	text, err := page.GetPlainText(context.Background(), nil)
 
 	// Should not panic and should return empty or error
 	if err != nil {

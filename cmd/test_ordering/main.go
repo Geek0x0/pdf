@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -22,13 +23,13 @@ func main() {
 	page := reader.Page(1)
 
 	// Test simple ordering
-	plainText, err := page.GetPlainText(nil)
+	plainText, err := page.GetPlainText(context.Background(), nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Test smart ordering
-	smartText, err := page.GetPlainTextWithSmartOrdering(nil)
+	smartText, err := page.GetPlainTextWithSmartOrdering(context.Background(), nil)
 	if err != nil {
 		log.Fatal(err)
 	}

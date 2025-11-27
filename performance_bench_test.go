@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,7 @@ func BenchmarkGetPlainTextOriginal(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := page.GetPlainText(nil)
+		_, err := page.GetPlainText(context.Background(), nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -44,7 +45,7 @@ func BenchmarkGetPlainTextOptimized(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		_, err := page.OptimizedGetPlainText(nil)
+		_, err := page.OptimizedGetPlainText(context.Background(), nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -359,14 +360,14 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 	b.Run("Original", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			_, _ = page.GetPlainText(nil)
+			_, _ = page.GetPlainText(context.Background(), nil)
 		}
 	})
 
 	b.Run("Optimized", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			_, _ = page.OptimizedGetPlainText(nil)
+			_, _ = page.OptimizedGetPlainText(context.Background(), nil)
 		}
 	})
 }

@@ -820,19 +820,28 @@ func tryRecoverFromOffset116(r *Reader) ([]xref, objptr, dict, error) {
 			continue // Already tried this
 		}
 		b := newBuffer(io.NewSectionReader(r.f, offset, r.end-offset), offset)
-		xr, tp, tr, err := readXrefTable(r, b)
-		PutPDFBuffer(b)
-		if err == nil {
-			return xr, tp, tr, nil
+		tok := b.readToken()
+
+		// Check if it's a traditional xref table
+		if tok == keyword("xref") {
+			xr, tp, tr, err := readXrefTable(r, b)
+			PutPDFBuffer(b)
+			if err == nil {
+				return xr, tp, tr, nil
+			}
 		}
 
-		// Try as xref stream
-		b = newBuffer(io.NewSectionReader(r.f, offset, r.end-offset), offset)
-		xr, tp, tr, err = readXrefStream(r, b)
-		PutPDFBuffer(b)
-		if err == nil {
-			return xr, tp, tr, nil
+		// Check if it's an xref stream (starts with object number)
+		if _, ok := tok.(int64); ok {
+			b.unreadToken(tok)
+			xr, tp, tr, err := readXrefStream(r, b)
+			PutPDFBuffer(b)
+			if err == nil {
+				return xr, tp, tr, nil
+			}
 		}
+
+		PutPDFBuffer(b)
 	}
 
 	return nil, objptr{}, nil, fmt.Errorf("offset 116 recovery failed")
@@ -1314,6 +1323,14 @@ func (r *Reader) searchXrefTable(data []byte) error {
 	xrefStart := int64(lastMatch + 1) // Skip the leading newline
 
 	b := newBuffer(io.NewSectionReader(r.f, xrefStart, r.end-xrefStart), xrefStart)
+
+	// Read and verify the "xref" keyword
+	tok := b.readToken()
+	if tok != keyword("xref") {
+		PutPDFBuffer(b)
+		return fmt.Errorf("expected 'xref' keyword at offset %d, got %v", xrefStart, tok)
+	}
+
 	xref, trailerptr, trailer, err := readXrefTable(r, b)
 	PutPDFBuffer(b)
 	if err != nil {

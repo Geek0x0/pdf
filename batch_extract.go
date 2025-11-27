@@ -237,9 +237,9 @@ func batchExtractWorker(r *Reader, jobs <-chan int, results chan<- BatchResult, 
 			go func() {
 				defer close(done)
 				if opts.SmartOrdering {
-					text, err = page.GetPlainTextWithSmartOrdering(nil)
+					text, err = page.GetPlainTextWithSmartOrdering(pageCtx, nil)
 				} else {
-					text, err = page.GetPlainText(nil)
+					text, err = page.GetPlainText(pageCtx, nil)
 				}
 			}()
 

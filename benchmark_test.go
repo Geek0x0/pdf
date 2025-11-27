@@ -84,7 +84,7 @@ func BenchmarkPageGetPlainText(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := page.GetPlainText(nil)
+		_, err := page.GetPlainText(context.Background(), nil)
 		if err != nil {
 			b.Fatalf("GetPlainText failed: %v", err)
 		}
@@ -114,7 +114,7 @@ func BenchmarkPageGetPlainTextWithFontCache(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := page.GetPlainText(fonts)
+		_, err := page.GetPlainText(context.Background(), fonts)
 		if err != nil {
 			b.Fatalf("GetPlainText failed: %v", err)
 		}

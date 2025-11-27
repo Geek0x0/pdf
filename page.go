@@ -123,7 +123,7 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 				fonts[name] = &f
 			}
 		}
-		text, err := p.GetPlainText(fonts)
+		text, err := p.GetPlainText(context.Background(), fonts)
 		if err != nil {
 			return &bytes.Buffer{}, err
 		}
@@ -822,7 +822,17 @@ type gstate struct {
 
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
-func (p Page) GetPlainText(fonts map[string]*Font) (string, error) {
+// ctx can be used to cancel the extraction operation (pass context.Background() if not needed)
+func (p Page) GetPlainText(ctx context.Context, fonts map[string]*Font) (string, error) {
+	// Check if context is cancelled before starting expensive operation
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+	}
+
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return "", nil
@@ -845,7 +855,17 @@ func (p Page) GetPlainText(fonts map[string]*Font) (string, error) {
 
 // GetPlainTextWithSmartOrdering extracts plain text using an improved text ordering algorithm
 // that handles multi-column layouts and complex reading orders.
-func (p Page) GetPlainTextWithSmartOrdering(fonts map[string]*Font) (string, error) {
+// ctx can be used to cancel the extraction operation (pass context.Background() if not needed)
+func (p Page) GetPlainTextWithSmartOrdering(ctx context.Context, fonts map[string]*Font) (string, error) {
+	// Check if context is cancelled before starting expensive operation
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+	}
+
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return "", nil
@@ -900,7 +920,7 @@ func (r *Reader) GetPlainTextConcurrent(workers int) (io.Reader, error) {
 			default:
 			}
 			page := r.Page(pageNum)
-			text, err := page.GetPlainText(nil)
+			text, err := page.GetPlainText(context.Background(), nil)
 			if err != nil {
 				cancel(err)
 				return

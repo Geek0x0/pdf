@@ -160,7 +160,7 @@ func BenchmarkBatchExtractVsSequential(b *testing.B) {
 	//     for i := 0; i < b.N; i++ {
 	//         for p := 1; p <= r.NumPage(); p++ {
 	//             page := r.Page(p)
-	//             _, err := page.GetPlainText(nil)
+	//             _, err := page.GetPlainText(context.Background(), nil)
 	//             if err != nil {
 	//                 b.Fatal(err)
 	//             }

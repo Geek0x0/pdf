@@ -34,7 +34,7 @@ func TestAsyncAndOptimizedExtractionPaths(t *testing.T) {
 	}
 
 	streamErr := ar.AsyncStream(ctx, func(p Page, i int) error {
-		_, _ = p.GetPlainText(nil)
+		_, _ = p.GetPlainText(context.Background(), nil)
 		return nil
 	})
 	if err := <-streamErr; err != nil {
@@ -53,7 +53,7 @@ func TestAsyncAndOptimizedExtractionPaths(t *testing.T) {
 	<-eChan
 
 	page := r.Page(1)
-	if _, err := page.OptimizedGetPlainText(nil); err != nil {
+	if _, err := page.OptimizedGetPlainText(context.Background(), nil); err != nil {
 		t.Fatalf("OptimizedGetPlainText error: %v", err)
 	}
 	if _, err := page.OptimizedGetTextByRow(); err != nil {

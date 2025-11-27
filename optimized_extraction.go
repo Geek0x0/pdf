@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -13,7 +14,17 @@ import (
 
 // OptimizedGetPlainText returns the page's all text using optimized string building.
 // This version uses object pools and pre-allocation to reduce memory allocations.
-func (p Page) OptimizedGetPlainText(fonts map[string]*Font) (string, error) {
+// ctx can be used to cancel the extraction operation (pass context.Background() if not needed)
+func (p Page) OptimizedGetPlainText(ctx context.Context, fonts map[string]*Font) (string, error) {
+	// Check if context is cancelled before starting expensive operation
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+	}
+
 	// Handle in case the content page is empty
 	if p.V.IsNull() || p.V.Key("Contents").Kind() == Null {
 		return "", nil
@@ -310,7 +321,7 @@ func (r *Reader) BatchExtractText(pageNums []int, useLazy bool) (map[int]string,
 		fontCache := make(map[string]*Font)
 		for _, pageNum := range pageNums {
 			page := r.Page(pageNum)
-			text, err := page.OptimizedGetPlainText(fontCache)
+			text, err := page.OptimizedGetPlainText(context.Background(), fontCache)
 			if err != nil {
 				return nil, wrapPageError("batch extract text", pageNum, err)
 			}
@@ -356,7 +367,7 @@ func (e *StreamingTextExtractor) NextPage() (pageNum int, text string, hasMore b
 	pageNum = e.currentPage
 	page := e.reader.Page(pageNum)
 
-	text, err = page.OptimizedGetPlainText(e.fontCache)
+	text, err = page.OptimizedGetPlainText(context.Background(), e.fontCache)
 	if err != nil {
 		return pageNum, "", false, wrapPageError("extract next page", pageNum, err)
 	}
@@ -382,7 +393,7 @@ func (e *StreamingTextExtractor) NextBatch() (results map[int]string, hasMore bo
 
 	for i := e.currentPage; i <= endPage; i++ {
 		page := e.reader.Page(i)
-		text, err := page.OptimizedGetPlainText(e.fontCache)
+		text, err := page.OptimizedGetPlainText(context.Background(), e.fontCache)
 		if err != nil {
 			return nil, false, wrapPageError("extract batch", i, err)
 		}

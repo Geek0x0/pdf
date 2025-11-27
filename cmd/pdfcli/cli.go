@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -62,7 +63,7 @@ func handlePlain(reader *pdf.Reader, page int) {
 		}
 		return
 	}
-	text, err := reader.Page(page).GetPlainText(nil)
+	text, err := reader.Page(page).GetPlainText(context.Background(), nil)
 	if err != nil {
 		log.Fatalf("Page(%d).GetPlainText: %v", page, err)
 	}
@@ -72,7 +73,7 @@ func handlePlain(reader *pdf.Reader, page int) {
 func handleText(reader *pdf.Reader, filePath string) {
 	for i := 1; i <= reader.NumPage(); i++ {
 		page := reader.Page(i)
-		text, err := page.GetPlainText(nil)
+		text, err := page.GetPlainText(context.Background(), nil)
 		if err != nil {
 			log.Fatalf("Page(%d).GetPlainText: %v", i, err)
 		}

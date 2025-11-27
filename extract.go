@@ -74,7 +74,7 @@ func (r *Reader) ExtractWithContext(ctx context.Context, opts ExtractOptions) (i
 
 			pageNum := pageList[idx]
 			page := r.Page(pageNum)
-			text, err := page.GetPlainText(nil)
+			text, err := page.GetPlainText(context.Background(), nil)
 			if err != nil {
 				select {
 				case errCh <- wrapPageError("extract text", pageNum, err):

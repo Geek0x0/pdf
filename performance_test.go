@@ -5,6 +5,7 @@
 package pdf
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -26,13 +27,13 @@ func TestOptimizedGetPlainText(t *testing.T) {
 	page := r.Page(1)
 
 	// Test original
-	text1, err := page.GetPlainText(nil)
+	text1, err := page.GetPlainText(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("GetPlainText failed: %v", err)
 	}
 
 	// Test optimized
-	text2, err := page.OptimizedGetPlainText(nil)
+	text2, err := page.OptimizedGetPlainText(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("OptimizedGetPlainText failed: %v", err)
 	}
@@ -500,7 +501,6 @@ func TestPutBlockSlice(t *testing.T) {
 	slice := make([]ClassifiedBlock, 5)
 	PutBlockSlice(slice) // Just test that it doesn't panic
 }
-
 
 func TestGetByteBuffer(t *testing.T) {
 	bufPtr := GetByteBuffer()

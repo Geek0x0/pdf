@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -45,9 +46,9 @@ func main() {
 
 		var text string
 		if useSmart {
-			text, err = page.GetPlainTextWithSmartOrdering(nil)
+			text, err = page.GetPlainTextWithSmartOrdering(context.Background(), nil)
 		} else {
-			text, err = page.GetPlainText(nil)
+			text, err = page.GetPlainText(context.Background(), nil)
 		}
 
 		if err != nil {

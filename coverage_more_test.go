@@ -91,7 +91,7 @@ func TestPageContentParsing(t *testing.T) {
 	}
 	page := Page{V: Value{r, objptr{}, pageDict}}
 
-	text, err := page.GetPlainText(nil)
+	text, err := page.GetPlainText(context.Background(), nil)
 	if err != nil || !strings.Contains(text, "Hello") {
 		t.Fatalf("GetPlainText failed: %v %q", err, text)
 	}

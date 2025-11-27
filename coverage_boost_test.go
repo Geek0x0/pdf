@@ -103,7 +103,7 @@ func TestMinimalPDFParsing(t *testing.T) {
 
 	// Verify trailer navigation and basic text extraction on the minimal page.
 	page := reader.Page(1)
-	text, err := page.GetPlainText(nil)
+	text, err := page.GetPlainText(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("GetPlainText: %v", err)
 	}

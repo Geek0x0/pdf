@@ -1089,8 +1089,9 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 			v2 := decodeInt(buf[w[0] : w[0]+w[1]])
 			v3 := decodeInt(buf[w[0]+w[1] : w[0]+w[1]+w[2]])
 			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
+			// Ensure table has enough capacity AND length
+			for len(table) <= x {
+				table = append(table, xref{})
 			}
 			if table[x].ptr != (objptr{}) {
 				continue
@@ -1595,11 +1596,9 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 				return nil, fmt.Errorf("malformed xref table")
 			}
 			x := int(start) + i
-			for cap(table) <= x {
-				table = append(table[:cap(table)], xref{})
-			}
-			if len(table) <= x {
-				table = table[:x+1]
+			// Ensure table has enough length
+			for len(table) <= x {
+				table = append(table, xref{})
 			}
 			if alloc == "n" && table[x].offset == 0 {
 				table[x] = xref{ptr: objptr{uint32(x), uint16(gen)}, offset: int64(off)}

@@ -906,7 +906,9 @@ func (b *buffer) readObject() object {
 		return nil
 	}
 
-	if str, ok := tok.(string); ok && b.key != nil && b.objptr.id != 0 {
+	// Only decrypt strings if we have a valid encryption key (non-empty)
+	// Note: b.key may be non-nil but empty from buffer pool, so we must check len(b.key) > 0
+	if str, ok := tok.(string); ok && len(b.key) > 0 && b.objptr.id != 0 {
 		tok = decryptString(b.key, b.useAES, b.objptr, str)
 	}
 

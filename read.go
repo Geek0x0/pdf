@@ -767,6 +767,17 @@ func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict,
 		if xr, trailerptr, trailer, err = tryRecoverXrefFromDict(r, d, offset); err == nil {
 			return
 		}
+
+		// If tryRecoverXrefFromDict failed, try global search for xref
+		// This handles cases where startxref points to a non-XRef stream dict
+		if searchErr := r.searchAndParseXref(); searchErr == nil {
+			return r.xref, r.trailerptr, r.trailer, nil
+		}
+
+		// Try rebuilding xref by scanning all objects
+		if rebuildErr := r.rebuildXrefTable(); rebuildErr == nil {
+			return r.xref, r.trailerptr, r.trailer, nil
+		}
 	}
 
 	// Check for common corruption patterns
@@ -780,24 +791,31 @@ func readXref(r *Reader, b *buffer) (xr []xref, trailerptr objptr, trailer dict,
 // the object start).
 func tryRecoverXrefFromDict(r *Reader, d dict, offset int64) ([]xref, objptr, dict, error) {
 	// Check if this dictionary has xref stream characteristics
-	if d["Type"] != name("XRef") {
-		return nil, objptr{}, nil, fmt.Errorf("dictionary is not an XRef stream")
+	// Accept dictionaries with Type:XRef OR dictionaries that look like stream headers
+	// (containing Filter and DecodeParms which are common in xref streams)
+	isXRefDict := d["Type"] == name("XRef")
+	isStreamDict := d["Filter"] != nil || d["DecodeParms"] != nil
+
+	if !isXRefDict && !isStreamDict {
+		return nil, objptr{}, nil, fmt.Errorf("dictionary is not an XRef stream or stream header")
 	}
 
-	// This looks like an xref stream dictionary
+	// This looks like an xref stream dictionary or a stream header
 	// We need to find the full stream object
 	// Search backward from current position to find object definition
 
-	// Read a chunk before the current position
-	searchStart := offset - 50
+	// Expand lookback window significantly - some PDFs have large gaps
+	const dictSearchBack = 8192
+	searchStart := offset - dictSearchBack
 	if searchStart < 0 {
 		searchStart = 0
 	}
-	chunkSize := offset - searchStart + 200
-	if chunkSize > r.end-searchStart {
-		chunkSize = r.end - searchStart
+
+	if offset <= searchStart {
+		return nil, objptr{}, nil, fmt.Errorf("could not find object definition")
 	}
 
+	chunkSize := offset - searchStart
 	chunk := make([]byte, chunkSize)
 	_, err := r.f.ReadAt(chunk, searchStart)
 	if err != nil && err != io.EOF {
@@ -805,8 +823,7 @@ func tryRecoverXrefFromDict(r *Reader, d dict, offset int64) ([]xref, objptr, di
 	}
 
 	// Look for "N M obj" pattern before the current position
-	relOffset := offset - searchStart
-	searchArea := chunk[:relOffset]
+	searchArea := chunk
 
 	// Find last occurrence of " obj"
 	objIdx := bytesLastIndexOptimized(searchArea, []byte(" obj"))
@@ -1324,51 +1341,63 @@ func (r *Reader) searchXrefStream(data []byte) error {
 	if len(positions) == 0 {
 		return errors.New("no xref stream found")
 	}
-	lastMatch := positions[len(positions)-1]
 
-	// Find the start of the object containing this xref stream
-	// Search backward for "N M obj" pattern
-	searchStart := lastMatch - 500
-	if searchStart < 0 {
-		searchStart = 0
-	}
+	// Try each position, starting from the last one (most likely to be the main xref)
+	var lastErr error
+	for i := len(positions) - 1; i >= 0; i-- {
+		matchPos := positions[i]
 
-	searchArea := data[searchStart:lastMatch]
-
-	// Find " obj" or line-starting "obj"
-	objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
-	bestIdx := -1
-	for _, p := range objPatterns {
-		idx := bytesLastIndexOptimized(searchArea, p)
-		if idx > bestIdx {
-			bestIdx = idx
+		// Find the start of the object containing this xref stream
+		// Search backward for "N M obj" pattern - expand search range significantly
+		searchStart := matchPos - 2000
+		if searchStart < 0 {
+			searchStart = 0
 		}
+
+		searchArea := data[searchStart:matchPos]
+
+		// Find " obj" or line-starting "obj"
+		objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
+		bestIdx := -1
+		for _, p := range objPatterns {
+			idx := bytesLastIndexOptimized(searchArea, p)
+			if idx > bestIdx {
+				bestIdx = idx
+			}
+		}
+
+		if bestIdx < 0 {
+			lastErr = errors.New("could not find object definition for xref stream")
+			continue
+		}
+
+		// Find line start
+		lineStart := bestIdx
+		for lineStart > 0 && searchArea[lineStart-1] != '\n' && searchArea[lineStart-1] != '\r' {
+			lineStart--
+		}
+
+		objStart := int64(searchStart + lineStart)
+
+		// Try to parse this as an xref stream
+		b := newBuffer(io.NewSectionReader(r.f, objStart, r.end-objStart), objStart)
+		xref, trailerptr, trailer, err := readXrefStream(r, b)
+		PutPDFBuffer(b)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		r.xref = xref
+		r.trailer = trailer
+		r.trailerptr = trailerptr
+		return nil
 	}
 
-	if bestIdx < 0 {
-		return errors.New("could not find object definition for xref stream")
+	if lastErr != nil {
+		return lastErr
 	}
-
-	// Find line start
-	lineStart := bestIdx
-	for lineStart > 0 && searchArea[lineStart-1] != '\n' && searchArea[lineStart-1] != '\r' {
-		lineStart--
-	}
-
-	objStart := int64(searchStart + lineStart)
-
-	// Try to parse this as an xref stream
-	b := newBuffer(io.NewSectionReader(r.f, objStart, r.end-objStart), objStart)
-	xref, trailerptr, trailer, err := readXrefStream(r, b)
-	PutPDFBuffer(b)
-	if err != nil {
-		return err
-	}
-
-	r.xref = xref
-	r.trailer = trailer
-	r.trailerptr = trailerptr
-	return nil
+	return errors.New("could not parse any xref stream")
 }
 
 // searchXrefTable searches for traditional xref table in the PDF data
@@ -1498,6 +1527,18 @@ func (r *Reader) recoverTrailer(data []byte) error {
 	// For PDF 1.5+ with xref stream, try to find and parse xref stream object
 	// The xref stream contains trailer information in its dictionary
 	if err := r.recoverXrefStreamTrailer(data); err == nil {
+		return nil
+	}
+
+	// Last resort: try to synthesize a minimal trailer by finding Root object
+	if rootRef := findRootObject(data); rootRef != (objptr{}) {
+		r.trailer = make(dict)
+		r.trailer["Size"] = int64(len(r.xref))
+		r.trailer["Root"] = rootRef
+		r.trailerptr = objptr{}
+		if DebugOn {
+			fmt.Printf("Synthesized minimal trailer with Root=%v\n", rootRef)
+		}
 		return nil
 	}
 

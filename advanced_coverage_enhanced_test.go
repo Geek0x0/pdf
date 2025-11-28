@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -180,6 +181,40 @@ func TestDiagnoseXrefCorruption(t *testing.T) {
 
 	if _, _, _, err := tryRecoverXrefFromDict(&Reader{}, dict{}, 10); err == nil {
 		t.Fatalf("expected error when recovering from non-xref dict")
+	}
+}
+
+func TestTryRecoverXrefFromDictExtendedLookup(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteString("1 0 obj\n")
+	buf.WriteString(strings.Repeat(" ", 300))
+	buf.WriteString("\n")
+	offset := int64(buf.Len())
+	buf.WriteString("<< /Type /XRef /Size 1 /W [1 3 1] /Length 5 >>\nstream\n")
+	buf.Write([]byte{1, 0, 0, 0, 0})
+	buf.WriteString("\nendstream\nendobj\n")
+
+	r := &Reader{
+		f:   bytes.NewReader(buf.Bytes()),
+		end: int64(buf.Len()),
+	}
+
+	d := dict{
+		name("Type"):   name("XRef"),
+		name("Size"):   int64(1),
+		name("W"):      array{int64(1), int64(3), int64(1)},
+		name("Length"): int64(5),
+	}
+
+	xr, _, trailer, err := tryRecoverXrefFromDict(r, d, offset)
+	if err != nil {
+		t.Fatalf("tryRecoverXrefFromDict failed: %v", err)
+	}
+	if len(xr) != 1 {
+		t.Fatalf("expected 1 xref entry, got %d", len(xr))
+	}
+	if trailer == nil || trailer["Size"] != int64(1) {
+		t.Fatalf("unexpected trailer: %+v", trailer)
 	}
 }
 

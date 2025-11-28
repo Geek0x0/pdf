@@ -682,6 +682,64 @@ func (b *buffer) readName() token {
 	return name(string(tmp))
 }
 
+// Common PDF keywords - pre-allocated to avoid repeated string allocations
+var commonKeywords = map[string]keyword{
+	"stream":    "stream",
+	"endstream": "endstream",
+	"obj":       "obj",
+	"endobj":    "endobj",
+	"R":         "R",
+	"null":      "null",
+	"xref":      "xref",
+	"trailer":   "trailer",
+	"startxref": "startxref",
+	"<<":        "<<",
+	">>":        ">>",
+	"[":         "[",
+	"]":         "]",
+	"n":         "n",
+	"f":         "f",
+	"BT":        "BT",
+	"ET":        "ET",
+	"Tf":        "Tf",
+	"Td":        "Td",
+	"TD":        "TD",
+	"Tm":        "Tm",
+	"T*":        "T*",
+	"Tj":        "Tj",
+	"TJ":        "TJ",
+	"'":         "'",
+	"\"":        "\"",
+	"q":         "q",
+	"Q":         "Q",
+	"cm":        "cm",
+	"Do":        "Do",
+	"re":        "re",
+	"m":         "m",
+	"l":         "l",
+	"c":         "c",
+	"h":         "h",
+	"S":         "S",
+	"s":         "s",
+	"B":         "B",
+	"b":         "b",
+	"W":         "W",
+	"W*":        "W*",
+	"gs":        "gs",
+	"CS":        "CS",
+	"cs":        "cs",
+	"SC":        "SC",
+	"sc":        "sc",
+	"SCN":       "SCN",
+	"scn":       "scn",
+	"G":         "G",
+	"g":         "g",
+	"RG":        "RG",
+	"rg":        "rg",
+	"K":         "K",
+	"k":         "k",
+}
+
 func (b *buffer) readKeyword() token {
 	tmp := b.tmp[:0]
 	for {
@@ -693,28 +751,61 @@ func (b *buffer) readKeyword() token {
 		tmp = append(tmp, c)
 	}
 	b.tmp = tmp
-	s := string(tmp)
-	switch {
-	case s == "true":
-		return true
-	case s == "false":
-		return false
-	case isInteger(s):
-		x, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			// When input is corrupted, fall back to regular keyword to avoid panic
-			return keyword(string(tmp))
+
+	// Fast path for common cases without string allocation
+	if len(tmp) <= 10 {
+		// Check for "true" and "false" without allocation
+		if len(tmp) == 4 && tmp[0] == 't' && tmp[1] == 'r' && tmp[2] == 'u' && tmp[3] == 'e' {
+			return true
 		}
-		return x
-	case isReal(s):
-		x, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			// When input is corrupted, fall back to regular keyword to avoid panic
-			return keyword(string(tmp))
+		if len(tmp) == 5 && tmp[0] == 'f' && tmp[1] == 'a' && tmp[2] == 'l' && tmp[3] == 's' && tmp[4] == 'e' {
+			return false
 		}
-		return x
 	}
-	return keyword(string(tmp))
+
+	// Check if it's a number first (common case) without string allocation
+	if len(tmp) > 0 {
+		firstChar := tmp[0]
+		if (firstChar >= '0' && firstChar <= '9') || firstChar == '+' || firstChar == '-' || firstChar == '.' {
+			// Likely a number, check more carefully
+			isNum := true
+			hasDot := firstChar == '.'
+			for i := 1; i < len(tmp); i++ {
+				c := tmp[i]
+				if c == '.' {
+					if hasDot {
+						isNum = false
+						break
+					}
+					hasDot = true
+				} else if c < '0' || c > '9' {
+					isNum = false
+					break
+				}
+			}
+			if isNum {
+				s := string(tmp)
+				if hasDot {
+					x, err := strconv.ParseFloat(s, 64)
+					if err == nil {
+						return x
+					}
+				} else {
+					x, err := strconv.ParseInt(s, 10, 64)
+					if err == nil {
+						return x
+					}
+				}
+			}
+		}
+	}
+
+	// For keywords, try to use interned version
+	s := string(tmp)
+	if kw, ok := commonKeywords[s]; ok {
+		return kw
+	}
+	return keyword(s)
 }
 
 func isInteger(s string) bool {

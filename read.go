@@ -1272,25 +1272,43 @@ func (r *Reader) searchAndParseXref() error {
 	return errors.New("could not find valid xref table or stream")
 }
 
+// findXRefStreamPositions scans raw PDF bytes and returns every position where
+// a /Type ... /XRef marker appears, tolerating arbitrary PDF whitespace (including newlines)
+// between the two tokens.
+func findXRefStreamPositions(data []byte) []int {
+	var positions []int
+	const needle = "/Type"
+	start := 0
+
+	for {
+		idx := bytes.Index(data[start:], []byte(needle))
+		if idx < 0 {
+			break
+		}
+		idx += start
+
+		j := idx + len(needle)
+		for j < len(data) && isSpace(data[j]) {
+			j++
+		}
+
+		if j < len(data) && bytes.HasPrefix(data[j:], []byte("/XRef")) {
+			positions = append(positions, idx)
+		}
+
+		start = idx + 1
+	}
+
+	return positions
+}
+
 // searchXrefStream searches for xref stream objects in the PDF data
 func (r *Reader) searchXrefStream(data []byte) error {
-	// Look for /Type /XRef pattern which indicates xref stream
-	patterns := [][]byte{
-		[]byte("/Type/XRef"),
-		[]byte("/Type /XRef"),
-	}
-
-	var lastMatch int = -1
-	for _, pattern := range patterns {
-		idx := bytesLastIndexOptimized(data, pattern)
-		if idx > lastMatch {
-			lastMatch = idx
-		}
-	}
-
-	if lastMatch < 0 {
+	positions := findXRefStreamPositions(data)
+	if len(positions) == 0 {
 		return errors.New("no xref stream found")
 	}
+	lastMatch := positions[len(positions)-1]
 
 	// Find the start of the object containing this xref stream
 	// Search backward for "N M obj" pattern
@@ -1475,24 +1493,7 @@ func (r *Reader) recoverTrailer(data []byte) error {
 func (r *Reader) recoverXrefStreamTrailer(data []byte) error {
 	// Search for xref stream objects by looking for "/Type /XRef" pattern
 	// This is more reliable than looking for startxref offset
-	patterns := [][]byte{
-		[]byte("/Type/XRef"),
-		[]byte("/Type /XRef"),
-		[]byte("/Type  /XRef"),
-	}
-
-	var candidates []int
-	for _, pattern := range patterns {
-		pos := 0
-		for {
-			idx := bytes.Index(data[pos:], pattern)
-			if idx < 0 {
-				break
-			}
-			candidates = append(candidates, pos+idx)
-			pos = pos + idx + len(pattern)
-		}
-	}
+	candidates := findXRefStreamPositions(data)
 
 	if len(candidates) == 0 {
 		return fmt.Errorf("no xref stream found")

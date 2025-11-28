@@ -1,8 +1,8 @@
 # GoPDF - High-Performance PDF Processing Library
 
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue.svg)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/go-%3E%3D1.24-blue.svg)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Test Coverage](https://img.shields.io/badge/coverage-66.9%25-yellow.svg)](https://github.com/Geek0x0/pdf)
+[![Test Coverage](https://img.shields.io/badge/coverage-67.6%25-yellow.svg)](https://github.com/Geek0x0/pdf)
 
 GoPDF is a powerful PDF processing library written in Go, focused on efficient text extraction, content analysis, and multilingual support. Built with a modular architecture, it provides high-performance concurrent processing capabilities.
 
@@ -33,6 +33,8 @@ GoPDF is a powerful PDF processing library written in Go, focused on efficient t
 - **Encoding Support**: UTF-16, PDFDocEncoding, WinAnsi, MacRoman, and more
 - **Compression Formats**: Flate, LZW, ASCII85, RunLength
 - **Encryption Support**: RC4, AES encrypted PDFs
+- **PDF Compatibility**: Comprehensive PDF version and feature compatibility checking
+- **PDF Recovery**: Automatic recovery from malformed or corrupted PDF files
 - **Thread Safety**: Fully concurrent-safe operations
 - **Robust Error Handling**: Graceful degradation for malformed PDFs
   - Library never panics on invalid input (errors returned instead)
@@ -159,22 +161,91 @@ func processTexts(texts []string) string {
 }
 ```
 
-### Text Block Classification
+### PDF Compatibility Checking
 
 ```go
-// Extract text with context
-textReader, err := reader.ExtractWithContext(ctx, gopdf.ExtractOptions{
-    Workers: 4,  // Number of parallel worker threads
-})
-
-// Classify text blocks
-blocks, err := page.ClassifyTextBlocks()
+// Check PDF compatibility and features
+data, err := os.ReadFile("document.pdf")
 if err != nil {
     log.Fatal(err)
 }
 
-for _, block := range blocks {
-    fmt.Printf("Type: %s, Text: %s\n", block.Type, block.Text)
+compat, err := pdf.CheckPDFCompatibility(data)
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("PDF Version: %s\n", compat.Version)
+fmt.Printf("Is Linearized: %v\n", compat.IsLinearized)
+fmt.Printf("Has Transparency: %v\n", compat.HasTransparency)
+fmt.Printf("Has Forms: %v\n", compat.HasForms)
+
+if len(compat.Warnings) > 0 {
+    fmt.Println("Warnings:")
+    for _, warning := range compat.Warnings {
+        fmt.Printf("  - %s\n", warning)
+    }
+}
+
+// Validate PDF/A compliance
+issues, err := pdf.ValidatePDFA(data)
+if err != nil {
+    log.Fatal(err)
+}
+
+if len(issues) == 0 {
+    fmt.Println("PDF/A validation passed")
+} else {
+    fmt.Println("PDF/A validation issues:")
+    for _, issue := range issues {
+        fmt.Printf("  - %s\n", issue)
+    }
+}
+```
+
+### PDF Integrity Checking and Recovery
+
+```go
+// Check PDF integrity before processing
+f, err := os.Open("potentially_corrupted.pdf")
+if err != nil {
+    log.Fatal(err)
+}
+defer f.Close()
+
+stat, err := f.Stat()
+if err != nil {
+    log.Fatal(err)
+}
+
+integrity := pdf.CheckIntegrity(f, stat.Size())
+fmt.Printf("PDF Valid: %v\n", integrity.IsValid)
+fmt.Printf("Is Truncated: %v\n", integrity.IsTruncated)
+fmt.Printf("Estimated Objects: %d\n", integrity.EstimatedObjects)
+
+if len(integrity.Issues) > 0 {
+    fmt.Println("Issues found:")
+    for _, issue := range integrity.Issues {
+        fmt.Printf("  - %s\n", issue)
+    }
+}
+
+// Attempt to recover corrupted PDF
+data, err := os.ReadFile("corrupted.pdf")
+if err != nil {
+    log.Fatal(err)
+}
+
+recovered, err := pdf.RecoverPDF(data)
+if err != nil {
+    log.Printf("Recovery failed: %v", err)
+} else {
+    fmt.Printf("Recovered PDF size: %d bytes\n", len(recovered))
+    // Save recovered PDF
+    err = os.WriteFile("recovered.pdf", recovered, 0644)
+    if err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -288,6 +359,9 @@ gopdf/
 ├── text.go                      # Core text extraction logic
 ├── page.go                      # Page structure analysis
 ├── metadata.go                  # Metadata processing
+├── compatibility.go             # PDF format compatibility checking
+├── recovery.go                  # PDF recovery for malformed files
+├── errors.go                    # Error handling and wrapping
 ├── caching.go                   # Caching strategy implementation
 ├── spatial_index.go             # Spatial indexing (R-tree)
 ├── text_classifier.go           # Text classifier
@@ -295,7 +369,6 @@ gopdf/
 ├── parallel_processing.go       # Parallel processing
 ├── performance.go               # Performance optimization
 ├── async_io.go                  # Asynchronous I/O
-├── errors.go                    # Error handling and wrapping
 │
 ├── Performance Optimizations (2024)
 ├── sharded_cache.go             # 256-shard high-performance cache
@@ -303,7 +376,8 @@ gopdf/
 ├── zero_copy_strings.go         # Zero-copy string operations
 ├── pool_warmup.go               # Memory pool pre-warming
 ├── enhanced_parallel.go         # Enhanced parallel processing
-└── optimizations_advanced.go    # Advanced optimizations
+├── optimizations_advanced.go    # Advanced optimizations
+└── memory_pools.go              # Advanced memory pool management
 ```
 
 ### Core Components
@@ -311,6 +385,8 @@ gopdf/
 - **Reader**: Main PDF reading interface with encryption support
 - **Text Extractor**: Intelligent text extraction engine with smart ordering
 - **Classifier**: ML-based text classification for semantic analysis
+- **Compatibility Checker**: PDF version and feature compatibility validation
+- **Recovery Engine**: Automatic repair and recovery for damaged PDFs
 - **Sharded Cache**: 256-shard lock-free cache system
 - **Font Prefetcher**: Pattern-based predictive font loading
 - **Parallel Extractor**: Adaptive worker pool with batch processing
@@ -330,16 +406,16 @@ Performance metrics based on standard test datasets (Intel i7-14700K):
 ### Optimization Benchmarks
 
 #### Sharded Cache Performance
-- **Set Operations**: ~114 ns/op (256 shards)
+- **Set Operations**: ~118 ns/op (256 shards)
 - **Get Operations**: ~112 ns/op
-- **Concurrent Access**: ~32 ns/op (70-80% lock contention reduction)
+- **Concurrent Access**: ~31 ns/op (70-80% lock contention reduction)
 - **Cache Hit Rate**: Up to 85% with LRU policies
 
 #### Zero-Copy String Operations
-- **BytesToString**: 0.12 ns/op (109x faster than standard)
-- **String Concat**: 10.44 ns/op (3.1x faster)
-- **TrimSpace**: 2.66 ns/op (1.2x faster)
-- **Split**: 60.51 ns/op (1.4x faster)
+- **BytesToString**: 0.14 ns/op (97x faster than standard)
+- **String Concat**: 10.12 ns/op (3.1x faster)
+- **TrimSpace**: 2.67 ns/op (1.2x faster)
+- **Split**: 59.62 ns/op (1.3x faster)
 
 #### Memory Pool Warmup
 - **Light Warmup**: ~37 µs (development)
@@ -355,7 +431,7 @@ Performance metrics based on standard test datasets (Intel i7-14700K):
 
 ## 🧪 Testing
 
-The project maintains testing standards with 39.5% coverage (main package):
+The project maintains testing standards with 67.6% coverage (main package):
 
 - Unit tests covering all core functionality
 - Integration tests for end-to-end PDF processing
@@ -394,7 +470,29 @@ go test -bench=BenchmarkStringOperations -run=^$ -benchtime=500ms
 go test -bench=BenchmarkShardedCache -run=^$ -benchtime=1s
 ```
 
-## 📚 API Documentation
+## 📋 Command Line Tool
+
+GoPDF includes a command-line tool for quick PDF text extraction:
+
+```bash
+# Build the CLI tool
+go build -o pdfcli ./cmd/pdfcli
+
+# Extract plain text from all pages
+./pdfcli document.pdf
+
+# Extract text from specific page
+./pdfcli -page 1 document.pdf
+
+# Extract styled text with formatting
+./pdfcli -mode styled document.pdf
+
+# Extract text organized by rows
+./pdfcli -mode rows -page 1 document.pdf
+
+# Extract text organized by columns
+./pdfcli -mode columns -page 1 document.pdf
+```
 
 ### Core Interfaces
 
@@ -402,6 +500,15 @@ go test -bench=BenchmarkShardedCache -run=^$ -benchtime=1s
 // PDF file operations
 Open(filename string) (*os.File, *Reader, error)
 NewReader(r io.ReaderAt, size int64) (*Reader, error)
+
+// PDF compatibility checking
+CheckPDFCompatibility(data []byte) (*PDFCompatibilityInfo, error)
+ValidatePDFA(data []byte) ([]string, error)
+ValidatePDFX(data []byte) ([]string, error)
+
+// PDF integrity and recovery
+CheckIntegrity(r io.ReaderAt, size int64) *IntegrityStatus
+RecoverPDF(data []byte) ([]byte, error)
 
 // Text extraction
 (reader *Reader) GetPlainText() (io.Reader, error)
@@ -488,9 +595,35 @@ go mod download
 # Run tests
 go test ./...
 
+# Run with coverage
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+
+# Run performance benchmarks
+go test -bench=. -benchmem -benchtime=500ms
+
 # Build examples
 go build ./examples/...
+
+# Run specific example
+go run ./examples/extract/main.go sample.pdf
 ```
+
+### Code Quality
+
+- **Linting**: Use `golangci-lint` for code quality checks
+- **Formatting**: Follow standard Go formatting with `gofmt`
+- **Testing**: Maintain or improve test coverage with new features
+- **Documentation**: Update README and code comments for API changes
+
+### Performance Contributions
+
+When contributing performance optimizations:
+
+1. Include benchmark tests for the optimization
+2. Measure memory usage impact with `go test -benchmem`
+3. Test under concurrent load scenarios
+4. Document the performance improvement metrics
 
 ## 📄 License
 

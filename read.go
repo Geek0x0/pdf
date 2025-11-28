@@ -288,6 +288,11 @@ func (r *Reader) Close() error {
 	// Clear object cache to free memory
 	r.ClearCache()
 
+	// Clear font cache to free memory
+	if r.fontCache != nil {
+		r.fontCache = nil
+	}
+
 	if r.closer != nil {
 		return r.closer.Close()
 	}
@@ -2567,7 +2572,7 @@ func (r *Reader) initEncrypt(password string) error {
 		return fmt.Errorf("malformed PDF: %d-bit encryption key", n)
 	}
 	V, _ := encrypt["V"].(int64)
-	if V != 1 && V != 2 && (V != 4 || !okayV4(encrypt)) {
+	if V != 1 && V != 2 && V != 4 && V != 5 {
 		return fmt.Errorf("unsupported PDF: encryption version V=%d; %v", V, objfmt(encrypt))
 	}
 
@@ -2585,13 +2590,17 @@ func (r *Reader) initEncrypt(password string) error {
 	if R < 2 {
 		return fmt.Errorf("malformed PDF: encryption revision R=%d", R)
 	}
-	if R > 4 {
+	if R > 6 {
 		return fmt.Errorf("unsupported PDF: encryption revision R=%d", R)
 	}
 	O, _ := encrypt["O"].(string)
 	U, _ := encrypt["U"].(string)
-	if len(O) != 32 || len(U) != 32 {
-		return fmt.Errorf("malformed PDF: missing O= or U= encryption parameters")
+	expectedLen := 32
+	if V == 5 {
+		expectedLen = 48
+	}
+	if len(O) != expectedLen || len(U) != expectedLen {
+		return fmt.Errorf("malformed PDF: missing O= or U= encryption parameters (expected length %d, got O=%d U=%d)", expectedLen, len(O), len(U))
 	}
 	p, _ := encrypt["P"].(int64)
 	P := uint32(p)
@@ -2655,6 +2664,43 @@ func (r *Reader) initEncrypt(password string) error {
 
 	r.key = key
 	r.useAES = V == 4
+
+	// Handle V=5 encryption (AES-256)
+	if V == 5 {
+		// Extract additional parameters for V=5
+		UE, _ := encrypt["UE"].(string)
+		OE, _ := encrypt["OE"].(string)
+		Perms, _ := encrypt["Perms"].(string)
+
+		if len(UE) != 32 || len(OE) != 32 || len(Perms) != 16 {
+			return fmt.Errorf("malformed PDF: missing UE/OE/Perms encryption parameters for V=5")
+		}
+
+		// Create encryption info for V=5
+		info := PDFEncryptionInfo{
+			Version:   EncryptionVersion(V),
+			Revision:  EncryptionRevision(R),
+			Method:    MethodAESV3,
+			KeyLength: 256,
+			P:         P,
+			ID:        ID,
+			O:         []byte(O),
+			U:         []byte(U),
+			UE:        []byte(UE),
+			OE:        []byte(OE),
+			Perms:     []byte(Perms),
+		} // Try to authenticate with the provided password
+		auth := NewPasswordAuth(&info)
+		key, err := auth.Authenticate(password)
+		if err != nil {
+			return err
+		}
+
+		r.key = key
+		r.useAES = true // V=5 always uses AES-256
+
+		return nil
+	}
 
 	return nil
 }

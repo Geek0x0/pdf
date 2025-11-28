@@ -373,19 +373,47 @@ func (f *Font) Encoder() TextEncoding {
 }
 
 func (f *Font) buildEncoder() TextEncoding {
-	if f.subtype() == "Type0" {
+	subtype := f.subtype()
+	switch subtype {
+	case "Type0":
 		if enc := f.type0Encoder(); enc != nil {
 			return enc
 		}
 		return nil
-	}
-	if f.subtype() == "Type3" {
+	case "Type1":
+		return f.type1Encoder()
+	case "TrueType":
+		return f.trueTypeEncoder()
+	case "Type3":
 		if enc := f.cmapEncodingFromValue(f.V.Key("ToUnicode")); enc != nil {
 			return enc
 		}
 		return f.simpleEncoder()
+	case "MMType1":
+		return f.type1Encoder()
+	default:
+		return f.simpleEncoder()
 	}
-	return f.simpleEncoder()
+}
+
+// ExtendedCIDFont returns an ExtendedCIDFont for CID-keyed fonts with enhanced CJK support
+func (f *Font) ExtendedCIDFont() *ExtendedCIDFont {
+	if f.subtype() != "Type0" {
+		return nil
+	}
+
+	desc := f.descendantFont()
+	if desc.Kind() != Dict {
+		return nil
+	}
+
+	// Check if it's a CIDFont
+	descSubtype := desc.Key("Subtype").Name()
+	if descSubtype != "CIDFontType0" && descSubtype != "CIDFontType2" {
+		return nil
+	}
+
+	return NewExtendedCIDFont(desc)
 }
 
 func (f *Font) simpleEncoder() TextEncoding {
@@ -432,6 +460,11 @@ func (f *Font) type0Encoder() TextEncoding {
 			return enc
 		}
 	case Name:
+		// Try enhanced CMAP encoding first (includes CJK support)
+		if enc := LookupPredefinedCMap(encoding.Name()); enc != nil {
+			return enc
+		}
+		// Fall back to builtin encoding
 		if enc := builtinCMapEncoding(encoding.Name()); enc != nil {
 			return enc
 		}
@@ -455,10 +488,67 @@ func (f *Font) type0Encoder() TextEncoding {
 	if f.writingMode() == 1 {
 		fallback = "Identity-V"
 	}
+	if enc := LookupPredefinedCMap(fallback); enc != nil {
+		return enc
+	}
 	if enc := builtinCMapEncoding(fallback); enc != nil {
 		return enc
 	}
 	return nil
+}
+
+// type1Encoder returns a text encoding for Type1 fonts
+func (f *Font) type1Encoder() TextEncoding {
+	// Check for ToUnicode mapping first
+	if enc := f.cmapEncodingFromValue(f.V.Key("ToUnicode")); enc != nil {
+		return enc
+	}
+
+	// Check for explicit encoding
+	enc := f.V.Key("Encoding")
+	switch enc.Kind() {
+	case Name:
+		switch enc.Name() {
+		case "WinAnsiEncoding":
+			return &byteEncoder{&winAnsiEncoding}
+		case "MacRomanEncoding":
+			return &byteEncoder{&macRomanEncoding}
+		case "StandardEncoding":
+			// Fall back to WinAnsi for StandardEncoding
+			return &byteEncoder{&winAnsiEncoding}
+		case "MacExpertEncoding":
+			// Fall back to MacRoman for MacExpertEncoding
+			return &byteEncoder{&macRomanEncoding}
+		case "Symbol":
+			// Fall back to WinAnsi for Symbol
+			return &byteEncoder{&winAnsiEncoding}
+		case "ZapfDingbats":
+			// Fall back to WinAnsi for ZapfDingbats
+			return &byteEncoder{&winAnsiEncoding}
+		}
+	case Dict:
+		// Custom encoding dictionary
+		return f.parseCustomEncoding(enc)
+	case Stream:
+		// ToUnicode stream
+		return f.cmapEncodingFromValue(enc)
+	}
+
+	// Default to WinAnsiEncoding for Type1 fonts
+	return &byteEncoder{&winAnsiEncoding}
+}
+
+// trueTypeEncoder returns a text encoding for TrueType fonts
+func (f *Font) trueTypeEncoder() TextEncoding {
+	// TrueType fonts use the same encoding logic as Type1 fonts
+	return f.type1Encoder()
+}
+
+// parseCustomEncoding parses a custom encoding dictionary
+func (f *Font) parseCustomEncoding(enc Value) TextEncoding {
+	// For now, return a basic encoder. This could be enhanced to parse
+	// the full encoding dictionary structure
+	return &byteEncoder{&winAnsiEncoding}
 }
 
 func (f Font) cmapEncodingFromValue(v Value) TextEncoding {
@@ -867,7 +957,7 @@ type gstate struct {
 // GetPlainText returns the page's all text without format.
 // fonts can be passed in (to improve parsing performance) or left nil
 // ctx can be used to cancel the extraction operation (pass context.Background() if not needed)
-func (p Page) GetPlainText(ctx context.Context, fonts map[string]*Font) (string, error) {
+func (p *Page) GetPlainText(ctx context.Context, fonts map[string]*Font) (string, error) {
 	// Check if context is cancelled before starting expensive operation
 	if ctx != nil {
 		select {
@@ -900,7 +990,7 @@ func (p Page) GetPlainText(ctx context.Context, fonts map[string]*Font) (string,
 // GetPlainTextWithSmartOrdering extracts plain text using an improved text ordering algorithm
 // that handles multi-column layouts and complex reading orders.
 // ctx can be used to cancel the extraction operation (pass context.Background() if not needed)
-func (p Page) GetPlainTextWithSmartOrdering(ctx context.Context, fonts map[string]*Font) (string, error) {
+func (p *Page) GetPlainTextWithSmartOrdering(ctx context.Context, fonts map[string]*Font) (string, error) {
 	// Check if context is cancelled before starting expensive operation
 	if ctx != nil {
 		select {

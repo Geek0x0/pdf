@@ -216,7 +216,7 @@ func parseStartxref(buf []byte) (pos int, xrefOffset int64) {
 	lastOffset := int64(-1)
 
 	for {
-		idx := bytes.LastIndex(searchBuf, []byte("startxref"))
+		idx := bytesLastIndexOptimized(searchBuf, []byte("startxref"))
 		if idx < 0 {
 			break
 		}
@@ -278,7 +278,7 @@ func findXrefTableDirect(data []byte) (offset int64, err error) {
 	// Find the last occurrence (main xref table)
 	lastIdx := -1
 	for _, pattern := range patterns {
-		idx := bytes.LastIndex(data, pattern)
+		idx := bytesLastIndexOptimized(data, pattern)
 		if idx > lastIdx {
 			lastIdx = idx
 		}
@@ -338,7 +338,7 @@ func findXrefStreamDirect(data []byte) (offset int64, err error) {
 	objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
 	bestIdx := -1
 	for _, p := range objPatterns {
-		idx := bytes.LastIndex(searchArea, p)
+		idx := bytesLastIndexOptimized(searchArea, p)
 		if idx > bestIdx {
 			bestIdx = idx
 		}
@@ -420,7 +420,7 @@ func rebuildXrefFromObjects(data []byte) ([]xref, error) {
 // findTrailerDict searches for trailer dictionary in data
 func findTrailerDict(data []byte) (dict, error) {
 	// Look for "trailer" keyword
-	idx := bytes.LastIndex(data, []byte("trailer"))
+	idx := bytesLastIndexOptimized(data, []byte("trailer"))
 	if idx >= 0 {
 		// Parse the dictionary following trailer
 		afterTrailer := idx + len("trailer")
@@ -752,7 +752,7 @@ func findRootObject(data []byte) objptr {
 		}
 
 		searchArea := data[searchStart:idx]
-		objIdx := bytes.LastIndex(searchArea, []byte(" obj"))
+		objIdx := bytesLastIndexOptimized(searchArea, []byte(" obj"))
 		if objIdx < 0 {
 			continue
 		}

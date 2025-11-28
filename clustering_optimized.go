@@ -268,6 +268,133 @@ func canMergeCoarseBatchAuto(g1 *blockGeom, g2s []blockGeom, threshold, threshol
 	canMergeCoarseBatchScalar(g1, g2s, threshold, threshold11, threshold15, threshold08, out)
 }
 
+// canMergeCoarseBatchAutoIdx 与 canMergeCoarseBatchAuto 相同，但直接使用索引避免在热路径上复制 blockGeom。
+// idx 中的元素是 geoms 的索引，out 必须至少 len(idx)。
+func canMergeCoarseBatchAutoIdx(g1 *blockGeom, geoms []blockGeom, idx []int, threshold, threshold11, threshold15, threshold08 float64, out []bool) {
+	if len(out) < len(idx) {
+		panic("out slice too small")
+	}
+
+	// 预取 g1 字段，避免循环内反复解引用
+	g1minX, g1maxX := g1.minX, g1.maxX
+	g1minY, g1maxY := g1.minY, g1.maxY
+	g1centerX, g1centerY := g1.centerX, g1.centerY
+	g1halfW, g1halfH := g1.halfW, g1.halfH
+
+	if hasAVX2() && len(idx) >= 4 {
+		var aMinX, aMaxX, aMinY, aMaxY [4]float64
+		var bMinX, bMaxX, bMinY, bMaxY [4]float64
+
+		i := 0
+		for ; i+4 <= len(idx); i += 4 {
+			for k := 0; k < 4; k++ {
+				j := idx[i+k]
+				g2 := &geoms[j]
+
+				aMinX[k] = g1minX
+				aMaxX[k] = g1maxX
+				aMinY[k] = g1minY
+				aMaxY[k] = g1maxY
+
+				bMinX[k] = g2.minX
+				bMaxX[k] = g2.maxX
+				bMinY[k] = g2.minY
+				bMaxY[k] = g2.maxY
+			}
+
+			mask := canMergeCoarseBatchAVX(&aMinX, &aMaxX, &aMinY, &aMaxY, &bMinX, &bMaxX, &bMinY, &bMaxY, threshold)
+			for k := 0; k < 4; k++ {
+				out[i+k] = (mask & (1 << uint(k))) != 0
+			}
+		}
+
+		// 处理尾部
+		if i >= len(idx) {
+			return
+		}
+		// 继续走标量路径，减少额外函数调用
+		for t := i; t < len(idx); t++ {
+			g2 := &geoms[idx[t]]
+
+			if g1maxX+threshold < g2.minX || g2.maxX+threshold < g1minX {
+				out[t] = false
+				continue
+			}
+			if g1maxY+threshold11 < g2.minY || g2.maxY+threshold11 < g1minY {
+				out[t] = false
+				continue
+			}
+
+			dx := g1centerX - g2.centerX
+			if dx < 0 {
+				dx = -dx
+			}
+			dy := g1centerY - g2.centerY
+			if dy < 0 {
+				dy = -dy
+			}
+
+			hGap := dx - (g1halfW + g2.halfW)
+			if hGap > threshold {
+				out[t] = false
+				continue
+			}
+			vGap := dy - (g1halfH + g2.halfH)
+			if vGap > threshold15 {
+				out[t] = false
+				continue
+			}
+			if hGap > threshold08 && vGap > threshold {
+				out[t] = false
+				continue
+			}
+
+			out[t] = true
+		}
+		return
+	}
+
+	// 纯标量路径
+	for i := 0; i < len(idx); i++ {
+		g2 := &geoms[idx[i]]
+
+		if g1maxX+threshold < g2.minX || g2.maxX+threshold < g1minX {
+			out[i] = false
+			continue
+		}
+		if g1maxY+threshold11 < g2.minY || g2.maxY+threshold11 < g1minY {
+			out[i] = false
+			continue
+		}
+
+		dx := g1centerX - g2.centerX
+		if dx < 0 {
+			dx = -dx
+		}
+		dy := g1centerY - g2.centerY
+		if dy < 0 {
+			dy = -dy
+		}
+
+		hGap := dx - (g1halfW + g2.halfW)
+		if hGap > threshold {
+			out[i] = false
+			continue
+		}
+		vGap := dy - (g1halfH + g2.halfH)
+		if vGap > threshold15 {
+			out[i] = false
+			continue
+		}
+		if hGap > threshold08 && vGap > threshold {
+			out[i] = false
+			continue
+		}
+
+		out[i] = true
+	}
+}
+
 // NewSpatialGrid creates a new spatial grid for the given blocks.
 // cellSize determines the granularity of the grid; typically should be
 // around 2-3x the expected cluster radius for optimal performance.

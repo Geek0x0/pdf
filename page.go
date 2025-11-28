@@ -1468,6 +1468,7 @@ type contentExtractor struct {
 	page     Page
 	text     []Text
 	rect     []Rect
+	argBuf   []Value
 	textCap  int // Track capacity to avoid frequent reallocations
 	growHint int // Hint for next growth size
 }
@@ -1480,11 +1481,8 @@ func (ce *contentExtractor) process(strm Value, resources Value, scope *fontScop
 	var enc TextEncoding = &nopEncoder{}
 	var gstack []gstate
 	Interpret(strm, func(stk *Stack, op string) {
-		n := stk.Len()
-		args := make([]Value, n)
-		for i := n - 1; i >= 0; i-- {
-			args[i] = stk.Pop()
-		}
+		args := stk.DrainTo(ce.argBuf)
+		ce.argBuf = args[:0] // keep buffer for reuse, avoid holding references
 		switch op {
 		default:
 			return

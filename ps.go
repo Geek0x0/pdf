@@ -11,7 +11,8 @@ import (
 
 // A Stack represents a stack of values.
 type Stack struct {
-	stack []Value
+	stack  []Value
+	inline [32]Value
 }
 
 func (stk *Stack) Len() int {
@@ -19,6 +20,9 @@ func (stk *Stack) Len() int {
 }
 
 func (stk *Stack) Push(v Value) {
+	if stk.stack == nil {
+		stk.stack = stk.inline[:0]
+	}
 	stk.stack = append(stk.stack, v)
 }
 
@@ -31,6 +35,30 @@ func (stk *Stack) Pop() Value {
 	stk.stack[n-1] = Value{}
 	stk.stack = stk.stack[:n-1]
 	return v
+}
+
+// DrainTo copies current stack content into dst (growing dst if needed) and
+// resets the stack without extra allocations. The returned slice length equals
+// the drained element count.
+func (stk *Stack) DrainTo(dst []Value) []Value {
+	if stk.stack == nil {
+		stk.stack = stk.inline[:0]
+	}
+	n := len(stk.stack)
+	if cap(dst) < n {
+		dst = make([]Value, n)
+	} else {
+		dst = dst[:n]
+	}
+	copy(dst, stk.stack)
+	stk.stack = stk.stack[:0]
+	return dst
+}
+
+func newStack() Stack {
+	var s Stack
+	s.stack = s.inline[:0]
+	return s
 }
 
 func newDict() Value {
@@ -65,7 +93,7 @@ func InterpretWithContext(ctx context.Context, strm Value, do func(stk *Stack, o
 
 // InterpretWithContextAndLimits is like InterpretWithContext but also accepts parse limits.
 func InterpretWithContextAndLimits(ctx context.Context, strm Value, do func(stk *Stack, op string), limits *ParseLimits) {
-	var stk Stack
+	stk := newStack()
 	var dicts []dict
 	s := strm
 	strmlen := 1

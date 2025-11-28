@@ -188,9 +188,9 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 			localResultBuf := make([]int, 0, 256)
 
 			// Reusable batch buffers to avoid allocations inside hot loop
-			batchIdx := make([]int, 0, 16)
-			batchGeoms := make([]blockGeom, 0, 16)
-			out := make([]bool, 16)
+			var batchIdxArr [16]int
+			var outArr [16]bool
+			batchIdx := batchIdxArr[:0]
 
 			for i := start; i < end; i++ {
 				gi := &geoms[i]
@@ -212,7 +212,7 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 				}
 
 				// collect up to 16 neighbors into batchIdx
-				batchIdx = batchIdx[:0]
+				batchIdx = batchIdxArr[:0]
 				for _, jj := range localResultBuf {
 					if jj <= i {
 						continue
@@ -227,17 +227,11 @@ func ClusterTextBlocksParallelV2(texts []Text) []*TextBlock {
 					continue
 				}
 
-				// prepare geoms batch (resize preserving capacity)
-				batchGeoms = batchGeoms[:len(batchIdx)]
-				for k := range batchIdx {
-					batchGeoms[k] = geoms[batchIdx[k]]
-				}
-
 				// ensure out slice length equals batch
-				out = out[:len(batchGeoms)]
+				out := outArr[:len(batchIdx)]
 
-				// coarse filter using AVX2 or scalar batch
-				canMergeCoarseBatchAuto(gi, batchGeoms, eps, eps11, eps15, eps08, out)
+				// coarse filter using AVX2 or scalar batch, zero-copy on geoms
+				canMergeCoarseBatchAutoIdx(gi, geoms, batchIdx, eps, eps11, eps15, eps08, out)
 
 				for k, ok := range out {
 					if !ok {

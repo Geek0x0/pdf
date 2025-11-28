@@ -97,9 +97,9 @@ func ClusterTextBlocksUltraOptimized(texts []Text) []*TextBlock {
 			localResultBuf := make([]int, 0, 256)
 
 			// 可重用的批处理缓冲区避免在热循环内分配
-			batchIdx := make([]int, 0, 16)
-			batchGeoms := make([]blockGeom, 0, 16)
-			out := make([]bool, 16)
+			var batchIdxArr [16]int
+			var outArr [16]bool
+			batchIdx := batchIdxArr[:0]
 
 			for i := start; i < end; i++ {
 				gi := &geoms[i]
@@ -121,7 +121,7 @@ func ClusterTextBlocksUltraOptimized(texts []Text) []*TextBlock {
 				}
 
 				// 收集最多16个邻居到 batchIdx
-				batchIdx = batchIdx[:0]
+				batchIdx = batchIdxArr[:0]
 				for _, jj := range localResultBuf {
 					if jj <= i {
 						continue
@@ -136,17 +136,11 @@ func ClusterTextBlocksUltraOptimized(texts []Text) []*TextBlock {
 					continue
 				}
 
-				// 准备几何批次（调整大小保留容量）
-				batchGeoms = batchGeoms[:len(batchIdx)]
-				for k := range batchIdx {
-					batchGeoms[k] = geoms[batchIdx[k]]
-				}
-
 				// 确保 out slice 长度等于批次
-				out = out[:len(batchGeoms)]
+				out := outArr[:len(batchIdx)]
 
-				// 使用 AVX2 或标量批次进行粗过滤
-				canMergeCoarseBatchAuto(gi, batchGeoms, eps, eps11, eps15, eps08, out)
+				// 使用 AVX2 或标量批次进行粗过滤（零拷贝）
+				canMergeCoarseBatchAutoIdx(gi, geoms, batchIdx, eps, eps11, eps15, eps08, out)
 
 				for k, ok := range out {
 					if !ok {

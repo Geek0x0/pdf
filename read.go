@@ -1051,11 +1051,19 @@ func readXrefStream(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		return nil, objptr{}, nil, fmt.Errorf("malformed PDF: %v", err)
 	}
 
+	seenPrev := make(map[int64]struct{})
 	for prevoff := strm.hdr["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if off < 0 || off >= r.end {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev offset out of range: %v", prevoff)
+		}
+		if _, seen := seenPrev[off]; seen {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev chain contains cycle at offset %d", off)
+		}
+		seenPrev[off] = struct{}{}
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		obj1 := b.readObject()
 		obj, ok := obj1.(objdef)
@@ -1208,11 +1216,19 @@ func readXrefTable(r *Reader, b *buffer) ([]xref, objptr, dict, error) {
 		}
 	}
 
+	seenPrev := make(map[int64]struct{})
 	for prevoff := trailer["Prev"]; prevoff != nil; {
 		off, ok := prevoff.(int64)
 		if !ok {
 			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev is not integer: %v", prevoff)
 		}
+		if off < 0 || off >= r.end {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev offset out of range: %v", prevoff)
+		}
+		if _, seen := seenPrev[off]; seen {
+			return nil, objptr{}, nil, fmt.Errorf("malformed PDF: xref Prev chain contains cycle at offset %d", off)
+		}
+		seenPrev[off] = struct{}{}
 		b := newBuffer(io.NewSectionReader(r.f, off, r.end-off), off)
 		tok := b.readToken()
 		if tok != keyword("xref") {

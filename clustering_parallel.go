@@ -29,6 +29,9 @@ func ClusterTextBlocksV4(texts []Text) []*TextBlock {
 		return ClusterTextBlocksOptimizedV2(texts)
 	case n < 500:
 		return ClusterTextBlocksV3(texts)
+	case n >= 1000:
+		// Use ultra-optimized version for large inputs
+		return ClusterTextBlocksUltraV2(texts)
 	default:
 		return ClusterTextBlocksParallelV2(texts)
 	}

@@ -91,6 +91,44 @@ func toLatin1(s string) []byte {
 	return b
 }
 
+// bytesLastIndexOptimized is an optimized replacement for bytes.LastIndex
+// that avoids the Rabin-Karp overhead for patterns <= 32 bytes.
+// For longer patterns, it falls back to bytes.LastIndex.
+//
+//go:nosplit
+func bytesLastIndexOptimized(s, sep []byte) int {
+	n := len(sep)
+	if n == 0 {
+		return len(s)
+	}
+	if n > len(s) {
+		return -1
+	}
+	// For short patterns, use simple reverse scan (faster than Rabin-Karp)
+	if n <= 32 {
+		first := sep[0]
+		last := sep[n-1]
+		for i := len(s) - n; i >= 0; i-- {
+			// Quick 2-byte check before full comparison
+			if s[i] == first && s[i+n-1] == last {
+				match := true
+				for j := 1; j < n-1; j++ {
+					if s[i+j] != sep[j] {
+						match = false
+						break
+					}
+				}
+				if match {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	// For longer patterns, use standard library
+	return bytes.LastIndex(s, sep)
+}
+
 // DebugOn is responsible for logging messages into stdout. If problems arise during reading, set it true.
 var DebugOn = false
 
@@ -405,7 +443,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	}
 
 	// Find %%EOF marker - it might not be at the very end
-	eofIdx := bytes.LastIndex(buf, []byte("%%EOF"))
+	eofIdx := bytesLastIndexOptimized(buf, []byte("%%EOF"))
 	if eofIdx < 0 {
 		// Try to continue without %%EOF for damaged files
 		// This is a recovery mechanism
@@ -482,7 +520,7 @@ func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, e
 	// Strategy 5: Last resort - search without strict line boundaries
 	if i < 0 {
 		// Try simple byte search as last resort
-		simpleIdx := bytes.LastIndex(buf, []byte("startxref"))
+		simpleIdx := bytesLastIndexOptimized(buf, []byte("startxref"))
 		if simpleIdx >= 0 {
 			// Verify it's on its own line by checking context
 			if simpleIdx > 0 && (buf[simpleIdx-1] == '\n' || buf[simpleIdx-1] == '\r') {
@@ -771,12 +809,12 @@ func tryRecoverXrefFromDict(r *Reader, d dict, offset int64) ([]xref, objptr, di
 	searchArea := chunk[:relOffset]
 
 	// Find last occurrence of " obj"
-	objIdx := bytes.LastIndex(searchArea, []byte(" obj"))
+	objIdx := bytesLastIndexOptimized(searchArea, []byte(" obj"))
 	if objIdx < 0 {
-		objIdx = bytes.LastIndex(searchArea, []byte("\nobj"))
+		objIdx = bytesLastIndexOptimized(searchArea, []byte("\nobj"))
 	}
 	if objIdx < 0 {
-		objIdx = bytes.LastIndex(searchArea, []byte("\robj"))
+		objIdx = bytesLastIndexOptimized(searchArea, []byte("\robj"))
 	}
 	if objIdx < 0 {
 		return nil, objptr{}, nil, fmt.Errorf("could not find object definition")
@@ -859,7 +897,7 @@ func searchBackwardForStartxref(f io.ReaderAt, size int64) int64 {
 		if err != nil && err != io.EOF {
 			return -1
 		}
-		idx := bytes.LastIndex(buf[:n], []byte("startxref"))
+		idx := bytesLastIndexOptimized(buf[:n], []byte("startxref"))
 		if idx >= 0 {
 			return int64(idx)
 		}
@@ -892,7 +930,7 @@ func searchBackwardForStartxref(f io.ReaderAt, size int64) int64 {
 		searchBuf = append(chunk, searchBuf...)
 
 		// Look for startxref in accumulated buffer
-		idx := bytes.LastIndex(searchBuf, []byte("startxref"))
+		idx := bytesLastIndexOptimized(searchBuf, []byte("startxref"))
 		if idx >= 0 {
 			// Found it! Calculate absolute position
 			// The searchBuf starts at 'offset', so absolute position is offset + idx
@@ -1244,7 +1282,7 @@ func (r *Reader) searchXrefStream(data []byte) error {
 
 	var lastMatch int = -1
 	for _, pattern := range patterns {
-		idx := bytes.LastIndex(data, pattern)
+		idx := bytesLastIndexOptimized(data, pattern)
 		if idx > lastMatch {
 			lastMatch = idx
 		}
@@ -1267,7 +1305,7 @@ func (r *Reader) searchXrefStream(data []byte) error {
 	objPatterns := [][]byte{[]byte(" obj"), []byte("\nobj"), []byte("\robj")}
 	bestIdx := -1
 	for _, p := range objPatterns {
-		idx := bytes.LastIndex(searchArea, p)
+		idx := bytesLastIndexOptimized(searchArea, p)
 		if idx > bestIdx {
 			bestIdx = idx
 		}
@@ -1311,7 +1349,7 @@ func (r *Reader) searchXrefTable(data []byte) error {
 
 	var lastMatch int = -1
 	for _, pattern := range patterns {
-		idx := bytes.LastIndex(data, pattern)
+		idx := bytesLastIndexOptimized(data, pattern)
 		if idx > lastMatch {
 			lastMatch = idx
 		}
@@ -1406,7 +1444,7 @@ func (r *Reader) rebuildXrefTable() error {
 
 func (r *Reader) recoverTrailer(data []byte) error {
 	// First, try to find traditional trailer keyword
-	idx := bytes.LastIndex(data, []byte("trailer"))
+	idx := bytesLastIndexOptimized(data, []byte("trailer"))
 	if idx >= 0 {
 		buf := newBuffer(bytes.NewReader(data[idx:]), int64(idx))
 		buf.allowEOF = true
@@ -1562,7 +1600,7 @@ func (r *Reader) findObjectStart(data []byte, pos int) int {
 
 	bestPos := -1
 	for _, pattern := range objPatterns {
-		idx := bytes.LastIndex(chunk, pattern)
+		idx := bytesLastIndexOptimized(chunk, pattern)
 		if idx > bestPos {
 			bestPos = idx
 		}
@@ -1627,31 +1665,54 @@ func readXrefTableData(b *buffer, table []xref) ([]xref, error) {
 	return table, nil
 }
 
+// findLastLine finds the last occurrence of s that starts at the beginning of a line.
+// Optimized version using manual reverse scan instead of bytes.LastIndex to avoid
+// Rabin-Karp overhead for short patterns.
 func findLastLine(buf []byte, s string) int {
+	if len(s) == 0 || len(buf) < len(s) {
+		return -1
+	}
+
 	bs := []byte(s)
-	max := len(buf)
-	for {
-		i := bytes.LastIndex(buf[:max], bs)
-		if i <= 0 {
-			return -1
-		}
-		// Check if we have a newline/CR before the keyword
-		if buf[i-1] != '\n' && buf[i-1] != '\r' {
-			max = i
+	slen := len(bs)
+	firstByte := bs[0]
+
+	// Scan backwards from the end of buffer
+	for i := len(buf) - slen; i >= 1; i-- {
+		// Quick check on first byte before full comparison
+		if buf[i] != firstByte {
 			continue
 		}
-		// Check if we have a newline/CR after (or keyword is at/near end of buffer)
-		afterPos := i + len(bs)
+
+		// Check if this position starts at beginning of line
+		if buf[i-1] != '\n' && buf[i-1] != '\r' {
+			continue
+		}
+
+		// Full pattern match
+		match := true
+		for j := 1; j < slen; j++ {
+			if buf[i+j] != bs[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+
+		// Check if we have newline/CR after (or at/near end of buffer)
+		afterPos := i + slen
 		if afterPos >= len(buf) {
-			// Keyword is at or near end of buffer - this is acceptable
-			// This handles cases where TrimRight removed trailing whitespace
 			return i
 		}
 		if buf[afterPos] == '\n' || buf[afterPos] == '\r' {
 			return i
 		}
-		max = i
+		// Space after is NOT acceptable - continue searching
 	}
+
+	return -1
 }
 
 // A Value is a single PDF value, such as an integer, dictionary, or array.

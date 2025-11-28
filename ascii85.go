@@ -32,7 +32,8 @@ func (a *alphaReader) Read(p []byte) (int, error) {
 		return n, err
 	}
 
-	buf := make([]byte, 0, n)
+	// Filter in-place to avoid allocation
+	writeIdx := 0
 	tilda := false
 	for i := 0; i < n; i++ {
 		char := checkASCII85(p[i])
@@ -40,13 +41,13 @@ func (a *alphaReader) Read(p []byte) (int, error) {
 			break
 		}
 		if char > 1 {
-			buf = append(buf, char)
+			p[writeIdx] = char
+			writeIdx++
 		}
 		if char == 1 {
 			tilda = true // possible end of data
 		}
 	}
 
-	copy(p, buf)
-	return len(buf), nil
+	return writeIdx, nil
 }

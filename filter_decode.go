@@ -24,6 +24,10 @@ type CCITTFaxDecoder struct {
 	currentLine []byte // Current decoding line
 	bitReader   *bitReader
 	eofReached  bool
+
+	// Optimized Huffman lookup tables
+	whiteLookup *huffmanLookupTable
+	blackLookup *huffmanLookupTable
 }
 
 // CCITTFaxParams contains parameters for CCITT fax decoding
@@ -58,7 +62,7 @@ func NewCCITTFaxDecoder(r io.Reader, params CCITTFaxParams) *CCITTFaxDecoder {
 		params.Columns = 1728
 	}
 
-	return &CCITTFaxDecoder{
+	decoder := &CCITTFaxDecoder{
 		r:           r,
 		params:      params,
 		width:       params.Columns,
@@ -68,6 +72,12 @@ func NewCCITTFaxDecoder(r io.Reader, params CCITTFaxParams) *CCITTFaxDecoder {
 		currentLine: make([]byte, params.Columns),
 		bitReader:   newBitReader(r),
 	}
+
+	// Initialize optimized Huffman lookup tables
+	decoder.whiteLookup = newHuffmanLookupTable(whiteTable)
+	decoder.blackLookup = newHuffmanLookupTable(blackTable)
+
+	return decoder
 }
 
 // Read implements io.Reader
@@ -397,18 +407,18 @@ func (d *CCITTFaxDecoder) read2DCode() (int, error) {
 }
 
 func (d *CCITTFaxDecoder) readWhiteCode() (int, error) {
-	return d.readHuffmanCode(whiteTable)
+	return d.readHuffmanCode(d.whiteLookup)
 }
 
 func (d *CCITTFaxDecoder) readBlackCode() (int, error) {
-	return d.readHuffmanCode(blackTable)
+	return d.readHuffmanCode(d.blackLookup)
 }
 
-func (d *CCITTFaxDecoder) readHuffmanCode(table []huffmanEntry) (int, error) {
+func (d *CCITTFaxDecoder) readHuffmanCode(lookup *huffmanLookupTable) (int, error) {
 	total := 0
 
 	for {
-		runLen, err := d.lookupHuffman(table)
+		runLen, err := d.lookupHuffmanOptimized(lookup)
 		if err != nil {
 			return 0, err
 		}
@@ -439,11 +449,62 @@ func (d *CCITTFaxDecoder) lookupHuffman(table []huffmanEntry) (int, error) {
 	return 0, fmt.Errorf("invalid Huffman code in CCITT data")
 }
 
+// lookupHuffmanOptimized performs O(1) Huffman code lookup using direct array access
+func (d *CCITTFaxDecoder) lookupHuffmanOptimized(lookup *huffmanLookupTable) (int, error) {
+	// Try codes from longest to shortest (Huffman prefix property)
+	for bits := uint8(13); bits >= 4; bits-- { // Start from longest codes
+		code, err := d.bitReader.PeekBits(int(bits))
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+
+		if entry, found := lookup.lookup(uint16(code), bits); found {
+			d.bitReader.SkipBits(int(bits))
+			return int(entry.runLen), nil
+		}
+	}
+
+	return 0, fmt.Errorf("invalid Huffman code in CCITT data")
+}
+
 // huffmanEntry represents a Huffman code entry
 type huffmanEntry struct {
 	code   uint16
 	bits   uint8
 	runLen uint16
+}
+
+// huffmanLookupTable provides O(1) Huffman code lookup using direct array indexing
+type huffmanLookupTable struct {
+	entries [8192]*huffmanEntry // Direct array lookup: 2^13 = 8192 possible codes
+}
+
+// newHuffmanLookupTable creates an optimized lookup table from a Huffman table
+func newHuffmanLookupTable(entries []huffmanEntry) *huffmanLookupTable {
+	lookup := &huffmanLookupTable{}
+
+	for i := range entries {
+		entry := &entries[i]
+		// Store the entry at the code index (which represents the bit pattern)
+		code := int(entry.code)
+		if code < len(lookup.entries) {
+			lookup.entries[code] = entry
+		}
+	}
+
+	return lookup
+}
+
+// lookup performs O(1) Huffman code lookup using direct array access
+func (hlt *huffmanLookupTable) lookup(code uint16, bits uint8) (*huffmanEntry, bool) {
+	if int(code) >= len(hlt.entries) {
+		return nil, false
+	}
+	entry := hlt.entries[code]
+	if entry != nil && entry.bits == bits {
+		return entry, true
+	}
+	return nil, false
 }
 
 // White terminating codes (0-63)

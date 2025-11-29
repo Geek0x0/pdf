@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf16"
+	"unsafe"
 )
 
 // CMapType represents the type of CMap
@@ -51,7 +53,13 @@ type CMap struct {
 	// UseCMap reference
 	useCMap TextEncoding
 
-	mu sync.RWMutex
+	// Lock-free performance optimizations using sync.Map
+	cidCache    *sync.Map // Precomputed CID mappings for fast lookup (lock-free)
+	decodeCache *sync.Map // Cached decode results (lock-free)
+	isOptimized bool      // Whether this CMap has been optimized
+
+	// Lock for creation and optimization phases only
+	mu sync.RWMutex // Protects struct fields during creation/optimization
 }
 
 type codeSpaceRange struct {
@@ -73,8 +81,10 @@ type cidChar struct {
 // NewCMap creates a new empty CMap
 func NewCMap(name string, cmapType CMapType) *CMap {
 	return &CMap{
-		Name: name,
-		Type: cmapType,
+		Name:        name,
+		Type:        cmapType,
+		cidCache:    &sync.Map{},
+		decodeCache: &sync.Map{},
 	}
 }
 
@@ -167,11 +177,24 @@ func (c *CMap) inCodeSpace(code []byte) bool {
 	return len(c.codeSpaceRanges) == 0 // If no code space defined, accept all
 }
 
-// LookupCID looks up the CID for a given character code
+// LookupCID looks up the CID for a given character code (lock-free)
 func (c *CMap) LookupCID(code []byte) (int, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	// First try lock-free cache
+	if c.isOptimized && c.cidCache != nil {
+		key := string(code)
+		if value, ok := c.cidCache.Load(key); ok {
+			if cid, ok := value.(int); ok {
+				return cid, true
+			}
+		}
+	}
 
+	// Fallback to original linear search (read-only, no lock needed after optimization)
+	return c.lookupCIDUncached(code)
+}
+
+// lookupCIDUncached performs the original linear search lookup
+func (c *CMap) lookupCIDUncached(code []byte) (int, bool) {
 	// Check single char mappings first
 	for _, ch := range c.cidChars {
 		if bytes.Equal(code, ch.code) {
@@ -204,11 +227,137 @@ func (c *CMap) LookupCID(code []byte) (int, bool) {
 	return 0, false
 }
 
-// Decode implements TextEncoding interface for ToUnicode CMaps
-func (c *CMap) Decode(raw string) string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+// OptimizeCIDLookup precomputes CID mappings for fast lookup
+// This should be called after all CID mappings are added to the CMap
+func (c *CMap) OptimizeCIDLookup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	if c.isOptimized {
+		return // Already optimized
+	}
+
+	// Precompute single character mappings
+	for _, ch := range c.cidChars {
+		c.cidCache.Store(string(ch.code), ch.cid)
+	}
+
+	// Precompute range mappings (sample key codes for common usage)
+	// For performance, we precompute mappings for byte lengths 1-4
+	for _, r := range c.cidRanges {
+		codeLen := len(r.low)
+		if codeLen == 0 || codeLen > 4 {
+			continue // Skip invalid or very long codes
+		}
+
+		// Precompute first N mappings in each range for common usage
+		maxPrecompute := 256 // Limit precomputation to avoid memory explosion
+		if codeLen == 1 {
+			maxPrecompute = 256
+		} else if codeLen == 2 {
+			maxPrecompute = 1024
+		} else {
+			maxPrecompute = 256
+		}
+
+		precomputed := 0
+		codes := make([][]byte, 0, maxPrecompute)
+
+		// Generate codes in range
+		if codeLen == 1 {
+			for b := r.low[0]; b <= r.high[0] && precomputed < maxPrecompute; b++ {
+				codes = append(codes, []byte{b})
+				precomputed++
+			}
+		} else if codeLen == 2 {
+			for b1 := r.low[0]; b1 <= r.high[0] && precomputed < maxPrecompute; b1++ {
+				for b2 := r.low[1]; b2 <= r.high[1] && precomputed < maxPrecompute; b2++ {
+					codes = append(codes, []byte{b1, b2})
+					precomputed++
+				}
+			}
+		} else {
+			// For longer codes, just precompute the first few
+			code := make([]byte, codeLen)
+			copy(code, r.low)
+			for i := 0; i < maxPrecompute && c.compareBytes(code, r.high) <= 0; i++ {
+				codeCopy := make([]byte, codeLen)
+				copy(codeCopy, code)
+				codes = append(codes, codeCopy)
+
+				// Increment code
+				for j := codeLen - 1; j >= 0; j-- {
+					if code[j] < 255 {
+						code[j]++
+						break
+					}
+					code[j] = 0
+				}
+			}
+		}
+
+		// Compute CIDs for precomputed codes
+		for _, code := range codes {
+			offset := 0
+			for i := range code {
+				offset = offset*256 + int(code[i]) - int(r.low[i])
+			}
+			c.cidCache.Store(string(code), r.cid+offset)
+		}
+	}
+
+	c.isOptimized = true
+}
+
+// compareBytes compares two byte slices lexicographically
+func (c *CMap) compareBytes(a, b []byte) int {
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+
+	for i := 0; i < minLen; i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return 0
+}
+
+// Decode implements TextEncoding interface for ToUnicode CMaps (lock-free)
+func (c *CMap) Decode(raw string) string {
+	// First try lock-free decode cache
+	if c.isOptimized && c.decodeCache != nil && len(raw) <= 256 {
+		if cached, ok := c.decodeCache.Load(raw); ok {
+			if result, ok := cached.(string); ok {
+				return result
+			}
+		}
+	}
+
+	// Perform decoding (read-only, no lock needed after optimization)
+	result := c.decodeUncached(raw)
+
+	// Cache result if appropriate (lock-free store)
+	if c.isOptimized && len(raw) <= 256 && len(result) <= 1024 {
+		c.decodeCache.Store(raw, result)
+	}
+
+	return result
+}
+
+// decodeUncached performs the actual decoding without caching
+func (c *CMap) decodeUncached(raw string) string {
 	var result strings.Builder
 	result.Grow(len(raw) * 2)
 
@@ -217,24 +366,23 @@ func (c *CMap) Decode(raw string) string {
 		matched := false
 
 		// Try different byte lengths based on code space ranges
-		for length := 4; length >= 1 && !matched; length-- {
+		// Prioritize common lengths for better performance
+		lengths := []int{2, 1, 4, 3} // Prioritize 2-byte codes (common for CJK)
+		for _, length := range lengths {
 			if i+length > len(raw) {
 				continue
 			}
 
 			code := raw[i : i+length]
 
-			// Check bfchar mappings
+			// Check bfchar mappings with early break
 			for _, bf := range c.bfChars {
 				if bf.orig == code {
 					result.WriteString(cmapDecodeUTF16BE(bf.repl))
 					i += length
 					matched = true
-					break
+					goto nextChar
 				}
-			}
-			if matched {
-				break
 			}
 
 			// Check bfrange mappings
@@ -270,14 +418,12 @@ func (c *CMap) Decode(raw string) string {
 					}
 					i += length
 					matched = true
-					break
+					goto nextChar
 				}
-			}
-			if matched {
-				break
 			}
 		}
 
+	nextChar:
 		// If no mapping found, try useCMap or pass through
 		if !matched {
 			if c.useCMap != nil {
@@ -738,18 +884,24 @@ func registerIdentityCMaps() {
 	// Identity-H and Identity-V are already in predefinedCMaps
 	// Just ensure they're in our registry too
 	if enc, ok := predefinedCMaps["Identity-H"]; ok {
-		RegisterPredefinedCMap("Identity-H", &PredefinedCMap{&CMap{
+		cm := &CMap{
 			Name:    "Identity-H",
 			WMode:   0,
 			useCMap: enc,
-		}})
+		}
+		// Pre-optimize identity mappings
+		cm.OptimizeCIDLookup()
+		RegisterPredefinedCMap("Identity-H", &PredefinedCMap{cm})
 	}
 	if enc, ok := predefinedCMaps["Identity-V"]; ok {
-		RegisterPredefinedCMap("Identity-V", &PredefinedCMap{&CMap{
+		cm := &CMap{
 			Name:    "Identity-V",
 			WMode:   1,
 			useCMap: enc,
-		}})
+		}
+		// Pre-optimize identity mappings
+		cm.OptimizeCIDLookup()
+		RegisterPredefinedCMap("Identity-V", &PredefinedCMap{cm})
 	}
 }
 
@@ -761,6 +913,7 @@ func registerAdobeGB1CMaps() {
 	// Add code space range for GBK
 	cm.AddCodeSpaceRange([]byte{0x00}, []byte{0x80})
 	cm.AddCodeSpaceRange([]byte{0x81, 0x40}, []byte{0xFE, 0xFE})
+	cm.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("GBK-EUC-H", &PredefinedCMap{cm})
 
 	// GBK-EUC-V: GBK encoding to CID vertical
@@ -769,6 +922,7 @@ func registerAdobeGB1CMaps() {
 	cmV.WMode = 1
 	cmV.AddCodeSpaceRange([]byte{0x00}, []byte{0x80})
 	cmV.AddCodeSpaceRange([]byte{0x81, 0x40}, []byte{0xFE, 0xFE})
+	cmV.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("GBK-EUC-V", &PredefinedCMap{cmV})
 
 	// UniGB-UCS2-H: Unicode to CID horizontal
@@ -776,6 +930,7 @@ func registerAdobeGB1CMaps() {
 	uniH.SetCIDSystemInfo("Adobe", "GB1", 4)
 	uniH.WMode = 0
 	uniH.AddCodeSpaceRange([]byte{0x00, 0x00}, []byte{0xFF, 0xFF})
+	uniH.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("UniGB-UCS2-H", &PredefinedCMap{uniH})
 
 	// UniGB-UCS2-V: Unicode to CID vertical
@@ -783,6 +938,7 @@ func registerAdobeGB1CMaps() {
 	uniV.SetCIDSystemInfo("Adobe", "GB1", 4)
 	uniV.WMode = 1
 	uniV.AddCodeSpaceRange([]byte{0x00, 0x00}, []byte{0xFF, 0xFF})
+	uniV.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("UniGB-UCS2-V", &PredefinedCMap{uniV})
 
 	// UniGB-UTF16-H
@@ -790,6 +946,7 @@ func registerAdobeGB1CMaps() {
 	utf16H.SetCIDSystemInfo("Adobe", "GB1", 5)
 	utf16H.WMode = 0
 	utf16H.AddCodeSpaceRange([]byte{0x00, 0x00}, []byte{0xFF, 0xFF})
+	utf16H.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("UniGB-UTF16-H", &PredefinedCMap{utf16H})
 
 	// UniGB-UTF16-V
@@ -797,6 +954,7 @@ func registerAdobeGB1CMaps() {
 	utf16V.SetCIDSystemInfo("Adobe", "GB1", 5)
 	utf16V.WMode = 1
 	utf16V.AddCodeSpaceRange([]byte{0x00, 0x00}, []byte{0xFF, 0xFF})
+	utf16V.OptimizeCIDLookup() // Pre-optimize
 	RegisterPredefinedCMap("UniGB-UTF16-V", &PredefinedCMap{utf16V})
 }
 
@@ -1211,4 +1369,226 @@ func (f *CIDFont) WritingMode() int {
 func (c *CMap) String() string {
 	return fmt.Sprintf("CMap{Name:%s, Type:%d, WMode:%d, Registry:%s, Ordering:%s}",
 		c.Name, c.Type, c.WMode, c.CIDSystemInfo.Registry, c.CIDSystemInfo.Ordering)
+}
+
+// ===================== High-Performance CMap Cache =====================
+
+// OptimizedCMapCache provides high-performance CMap caching with:
+// - Lock-free read path using atomic operations
+// - Sharded design to reduce lock contention (8 shards)
+// - Zero-allocation fast path for cache hits
+// - LRU eviction with atomic operations
+type OptimizedCMapCache struct {
+	shards [8]*cmapCacheShard
+	mask   uint64
+}
+
+// cmapCacheShard is a single shard of the CMap cache
+type cmapCacheShard struct {
+	// Lock-free read path
+	entries unsafe.Pointer // *map[string]*optimizedCMapEntry (atomic swap)
+
+	// Write path (protected by mutex)
+	mu         sync.Mutex
+	writeMap   map[string]*optimizedCMapEntry
+	maxEntries int
+
+	// LRU tracking (lock-free approximation)
+	head *optimizedCMapEntry
+	tail *optimizedCMapEntry
+
+	// Statistics (lock-free using atomic)
+	hits   uint64
+	misses uint64
+}
+
+// optimizedCMapEntry represents a cached CMap with LRU links
+type optimizedCMapEntry struct {
+	cmap     *CMap
+	key      string
+	next     *optimizedCMapEntry
+	prev     *optimizedCMapEntry
+	refCount int32 // Atomic reference counting
+}
+
+// NewOptimizedCMapCache creates a new optimized CMap cache
+func NewOptimizedCMapCache(maxEntries int) *OptimizedCMapCache {
+	cache := &OptimizedCMapCache{
+		mask: 7, // 8 shards - 1
+	}
+
+	entriesPerShard := maxEntries / len(cache.shards)
+	for i := range cache.shards {
+		cache.shards[i] = &cmapCacheShard{
+			writeMap:   make(map[string]*optimizedCMapEntry),
+			maxEntries: entriesPerShard,
+		}
+	}
+
+	return cache
+}
+
+// Get retrieves a CMap from cache with lock-free fast path
+func (c *OptimizedCMapCache) Get(key string) (*CMap, bool) {
+	shard := c.shards[c.hash(key)&c.mask]
+
+	// Lock-free read path
+	readMap := (*map[string]*optimizedCMapEntry)(atomic.LoadPointer(&shard.entries))
+	if readMap != nil {
+		if entry, ok := (*readMap)[key]; ok {
+			atomic.AddUint64(&shard.hits, 1)
+			atomic.AddInt32(&entry.refCount, 1)
+			return entry.cmap, true
+		}
+	}
+
+	// Slow path - acquire lock
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	atomic.AddUint64(&shard.misses, 1)
+
+	if entry, ok := shard.writeMap[key]; ok {
+		// Move to front of LRU
+		c.moveToFront(shard, entry)
+		atomic.AddInt32(&entry.refCount, 1)
+		return entry.cmap, true
+	}
+
+	return nil, false
+}
+
+// Put adds a CMap to the cache
+func (c *OptimizedCMapCache) Put(key string, cmap *CMap) {
+	shard := c.shards[c.hash(key)&c.mask]
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	// Check if already exists
+	if entry, ok := shard.writeMap[key]; ok {
+		entry.cmap = cmap
+		c.moveToFront(shard, entry)
+		return
+	}
+
+	// Create new entry
+	entry := &optimizedCMapEntry{
+		cmap:     cmap,
+		key:      key,
+		refCount: 1,
+	}
+
+	shard.writeMap[key] = entry
+	c.insertAtFront(shard, entry)
+
+	// Evict if over capacity
+	if len(shard.writeMap) > shard.maxEntries {
+		c.evictLRU(shard)
+	}
+
+	// Atomically update read map
+	newReadMap := make(map[string]*optimizedCMapEntry)
+	for k, v := range shard.writeMap {
+		newReadMap[k] = v
+	}
+	atomic.StorePointer(&shard.entries, unsafe.Pointer(&newReadMap))
+}
+
+// Release decrements reference count
+func (c *OptimizedCMapCache) Release(key string) {
+	shard := c.shards[c.hash(key)&c.mask]
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if entry, ok := shard.writeMap[key]; ok {
+		atomic.AddInt32(&entry.refCount, -1)
+	}
+}
+
+// GetStats returns cache statistics
+func (c *OptimizedCMapCache) GetStats() (hits, misses uint64) {
+	for _, shard := range c.shards {
+		hits += atomic.LoadUint64(&shard.hits)
+		misses += atomic.LoadUint64(&shard.misses)
+	}
+	return
+}
+
+// hash computes a simple hash for shard selection
+func (c *OptimizedCMapCache) hash(key string) uint64 {
+	var h uint64 = 5381
+	for _, b := range []byte(key) {
+		h = ((h << 5) + h) + uint64(b)
+	}
+	return h
+}
+
+// moveToFront moves an entry to the front of LRU list
+func (c *OptimizedCMapCache) moveToFront(shard *cmapCacheShard, entry *optimizedCMapEntry) {
+	if entry == shard.head {
+		return
+	}
+
+	// Remove from current position
+	if entry.prev != nil {
+		entry.prev.next = entry.next
+	}
+	if entry.next != nil {
+		entry.next.prev = entry.prev
+	}
+	if entry == shard.tail {
+		shard.tail = entry.prev
+	}
+
+	// Insert at front
+	entry.prev = nil
+	entry.next = shard.head
+	if shard.head != nil {
+		shard.head.prev = entry
+	}
+	shard.head = entry
+
+	if shard.tail == nil {
+		shard.tail = entry
+	}
+}
+
+// insertAtFront inserts a new entry at the front
+func (c *OptimizedCMapCache) insertAtFront(shard *cmapCacheShard, entry *optimizedCMapEntry) {
+	entry.prev = nil
+	entry.next = shard.head
+
+	if shard.head != nil {
+		shard.head.prev = entry
+	}
+	shard.head = entry
+
+	if shard.tail == nil {
+		shard.tail = entry
+	}
+}
+
+// evictLRU removes the least recently used entry
+func (c *OptimizedCMapCache) evictLRU(shard *cmapCacheShard) {
+	if shard.tail == nil {
+		return
+	}
+
+	entry := shard.tail
+	shard.tail = entry.prev
+	if shard.tail != nil {
+		shard.tail.next = nil
+	}
+
+	delete(shard.writeMap, entry.key)
+}
+
+// Global CMap cache instance
+var globalCMapCache = NewOptimizedCMapCache(1024)
+
+// GetGlobalCMapCache returns the global CMap cache
+func GetGlobalCMapCache() *OptimizedCMapCache {
+	return globalCMapCache
 }

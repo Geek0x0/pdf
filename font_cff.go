@@ -47,12 +47,23 @@ type CFFFont struct {
 	isCID       bool
 }
 
-// NewCFFFont parses CFF font data
+// NewCFFFont parses CFF font data with caching
 func NewCFFFont(data []byte) (*CFFFont, error) {
+	// Try to get from cache first
+	cache := GetGlobalCFFCache()
+	if cachedFont, found := cache.GetFont(data); found {
+		return cachedFont, nil
+	}
+
+	// Parse the font
 	font := &CFFFont{}
 	if err := font.parse(data); err != nil {
 		return nil, err
 	}
+
+	// Cache the parsed font
+	cache.PutFont(data, font)
+
 	return font, nil
 }
 
@@ -519,21 +530,32 @@ type CFFCharStringDecoder struct {
 	hasWidth bool
 }
 
-// NewCFFCharStringDecoder creates a new CharString decoder
+// NewCFFCharStringDecoder creates a new CharString decoder with pooled objects
 func NewCFFCharStringDecoder(data []byte) *CFFCharStringDecoder {
+	pool := GetGlobalCFFPool()
 	return &CFFCharStringDecoder{
 		data:  data,
-		stack: make([]float64, 0, 48), // CFF spec says max 48 elements
+		stack: pool.GetStack(),
 	}
 }
 
-// Decode decodes the CharString and returns the path commands
+// Decode decodes the CharString and returns the path commands with caching and pooling
 func (d *CFFCharStringDecoder) Decode() ([]interface{}, error) {
-	var commands []interface{}
+	// Try to get from cache first
+	cache := GetGlobalCFFCache()
+	if cachedCommands, found := cache.GetDecoding(d.data); found {
+		return cachedCommands, nil
+	}
 
+	// Get pooled command slice
+	pool := GetGlobalCFFPool()
+	commands := pool.GetCommandSlice()
+
+	// Decode the commands
 	for d.pos < len(d.data) {
 		cmd, err := d.decodeCommand()
 		if err != nil {
+			pool.PutCommandSlice(commands)
 			return nil, err
 		}
 
@@ -542,6 +564,14 @@ func (d *CFFCharStringDecoder) Decode() ([]interface{}, error) {
 		}
 	}
 
+	// Make a copy for caching (since we're returning the pooled slice)
+	commandsCopy := make([]interface{}, len(commands))
+	copy(commandsCopy, commands)
+
+	// Cache the decoded commands
+	cache.PutDecoding(d.data, commandsCopy)
+
+	// Return the pooled slice (caller should return it to pool when done)
 	return commands, nil
 }
 

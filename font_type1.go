@@ -59,8 +59,15 @@ type Type1Font struct {
 	widths      map[string]float64
 }
 
-// NewType1Font creates a new Type1 font from raw font data
+// NewType1Font creates a new Type1 font from raw font data with caching
 func NewType1Font(data []byte) (*Type1Font, error) {
+	// Try to get from cache first
+	cache := GetGlobalType1Cache()
+	if cachedFont, found := cache.GetFont(data); found {
+		return cachedFont, nil
+	}
+
+	// Parse the font
 	font := &Type1Font{
 		info:        &Type1FontInfo{},
 		charStrings: make(map[string][]byte),
@@ -71,6 +78,9 @@ func NewType1Font(data []byte) (*Type1Font, error) {
 	if err := font.parse(data); err != nil {
 		return nil, err
 	}
+
+	// Cache the parsed font
+	cache.PutFont(data, font)
 
 	return font, nil
 }

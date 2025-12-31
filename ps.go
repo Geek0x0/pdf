@@ -119,6 +119,7 @@ func InterpretWithContextAndLimits(ctx context.Context, strm Value, do func(stk 
 		}
 
 		rd := s.Reader()
+		defer rd.Close() // Important: close reader to prevent resource leak in this iteration
 
 		b := newBuffer(rd, 0)
 		b.allowEOF = true

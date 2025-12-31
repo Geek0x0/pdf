@@ -233,6 +233,7 @@ func (cf *ExtendedCIDFont) parseCIDToGIDMap() {
 	if data == nil {
 		return
 	}
+	defer data.Close() // Important: close reader to prevent resource leak
 
 	buf := make([]byte, 65536*2) // Max 64K CIDs, 2 bytes each
 	n, _ := data.Read(buf)

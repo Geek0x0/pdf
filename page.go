@@ -1541,7 +1541,13 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 
 	// Use pooled slices to reduce allocations in appendText
 	textSlice, rectSlice := GetContentExtractorSlices()
-	extractor := contentExtractor{page: p, text: textSlice, rect: rectSlice}
+	extractor := contentExtractor{
+		page:            p,
+		text:            textSlice,
+		rect:            rectSlice,
+		visitedXObjects: make(map[string]int),
+		recursionDepth:  0,
+	}
 	scope = p.buildFontScope(p.Resources(), fonts, nil)
 	initial := gstate{
 		Th:  1,
@@ -1554,13 +1560,18 @@ func (p Page) contentWithFonts(fonts map[string]*Font) (Content, error) {
 	return content, err
 }
 
+// Maximum recursion depth for nested XObject forms to prevent stack overflow
+const maxXObjectRecursionDepth = 50
+
 type contentExtractor struct {
-	page     Page
-	text     []Text
-	rect     []Rect
-	argBuf   []Value
-	textCap  int // Track capacity to avoid frequent reallocations
-	growHint int // Hint for next growth size
+	page            Page
+	text            []Text
+	rect            []Rect
+	argBuf          []Value
+	textCap         int            // Track capacity to avoid frequent reallocations
+	growHint        int            // Hint for next growth size
+	visitedXObjects map[string]int // Track visited XObject names to detect cycles, value is visit count
+	recursionDepth  int            // Current recursion depth for XObject processing
 }
 
 func (ce *contentExtractor) process(strm Value, resources Value, scope *fontScope, initial gstate) {
@@ -1867,6 +1878,22 @@ func (ce *contentExtractor) handleDo(arg Value, resources Value, scope *fontScop
 	if name == "" {
 		return
 	}
+
+	// Check recursion depth limit to prevent stack overflow
+	if ce.recursionDepth >= maxXObjectRecursionDepth {
+		// Silently return instead of panicking to allow partial extraction
+		return
+	}
+
+	// Check if we've already visited this XObject to detect circular references
+	if ce.visitedXObjects[name] > 0 {
+		// Allow visiting same XObject once more (some PDFs legitimately reuse forms)
+		// but prevent deeper cycles
+		if ce.visitedXObjects[name] >= 2 {
+			return
+		}
+	}
+
 	xobjects := resources.Key("XObject")
 	if xobjects.Kind() != Dict {
 		return
@@ -1884,7 +1911,20 @@ func (ce *contentExtractor) handleDo(arg Value, resources Value, scope *fontScop
 	if m, ok := matrixFromValue(xobj.Key("Matrix")); ok {
 		childState.CTM = m.mul(childState.CTM)
 	}
+
+	// Track this XObject visit and increment recursion depth
+	ce.visitedXObjects[name]++
+	ce.recursionDepth++
+
+	// Process the XObject form
 	ce.process(xobj, formRes, childScope, childState)
+
+	// Restore recursion depth and decrement visit count after processing
+	ce.recursionDepth--
+	ce.visitedXObjects[name]--
+	if ce.visitedXObjects[name] == 0 {
+		delete(ce.visitedXObjects, name)
+	}
 }
 
 // TextVertical implements sort.Interface for sorting
@@ -1915,6 +1955,9 @@ func (x TextHorizontal) Less(i, j int) bool {
 	return x[i].Y > x[j].Y
 }
 
+// Maximum recursion depth for outline traversal to prevent stack overflow
+const maxOutlineDepth = 100
+
 // An Outline is a tree describing the outline (also known as the table of contents)
 // of a document.
 type Outline struct {
@@ -1926,14 +1969,68 @@ type Outline struct {
 // The Outline returned is the root of the outline tree and typically has no Title itself.
 // That is, the children of the returned root are the top-level entries in the outline.
 func (r *Reader) Outline() Outline {
-	return buildOutline(r.Trailer().Key("Root").Key("Outlines"))
+	visited := make(map[uintptr]bool)
+	return buildOutlineWithDepth(r.Trailer().Key("Root").Key("Outlines"), visited, 0)
 }
 
 func buildOutline(entry Value) Outline {
+	visited := make(map[uintptr]bool)
+	return buildOutlineWithDepth(entry, visited, 0)
+}
+
+func buildOutlineWithDepth(entry Value, visited map[uintptr]bool, depth int) Outline {
 	var x Outline
+
+	// Check depth limit to prevent stack overflow
+	if depth >= maxOutlineDepth {
+		return x
+	}
+
+	// Check if entry is null or not a dict
+	if entry.Kind() != Dict {
+		return x
+	}
+
 	x.Title = entry.Key("Title").Text()
+
+	// Traverse children using First/Next links
 	for child := entry.Key("First"); child.Kind() == Dict; child = child.Key("Next") {
-		x.Child = append(x.Child, buildOutline(child))
+		// Use a unique identifier for cycle detection
+		// We use the objptr if available, otherwise skip cycle detection for inline dicts
+		childPtr := getValuePtr(child)
+
+		// Check for circular reference
+		if childPtr != 0 {
+			if visited[childPtr] {
+				// Circular reference detected, stop traversal
+				break
+			}
+			visited[childPtr] = true
+		}
+
+		// Recursively build child outline
+		childOutline := buildOutlineWithDepth(child, visited, depth+1)
+		x.Child = append(x.Child, childOutline)
+
+		// Clean up visited marker for this specific child to allow siblings
+		// (but parent's visited map will prevent cycles back to ancestors)
+		if childPtr != 0 {
+			delete(visited, childPtr)
+		}
+
+		// Safety: limit number of siblings to prevent malicious PDFs
+		if len(x.Child) >= 1000 {
+			break
+		}
 	}
 	return x
+}
+
+// getValuePtr returns a unique identifier for a Value to detect cycles
+func getValuePtr(v Value) uintptr {
+	// Use the object pointer (ptr field) if this is an indirect object
+	if v.ptr.id != 0 {
+		return uintptr(v.ptr.id)<<32 | uintptr(v.ptr.gen)
+	}
+	return 0
 }

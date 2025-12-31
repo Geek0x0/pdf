@@ -1149,6 +1149,7 @@ func readXrefStreamData(r *Reader, strm stream, table []xref, size int64) ([]xre
 	}
 	buf := make([]byte, wtotal)
 	data := v.Reader()
+	defer data.Close() // Important: close reader to prevent resource leak
 	for len(index) > 0 {
 		start, ok1 := index[0].(int64)
 		n, ok2 := index[1].(int64)

@@ -675,6 +675,7 @@ func ParseType1FromStream(v Value) (*Type1Font, error) {
 	if reader == nil {
 		return nil, nil
 	}
+	defer reader.Close() // Important: close reader to prevent resource leak
 
 	data, err := io.ReadAll(reader)
 	if err != nil {

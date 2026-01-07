@@ -344,6 +344,9 @@ func (pa *PasswordAuth) authenticateUserR5(password string) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(pa.info.UE)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid UE length: not full AES blocks")
+	}
 	ue := make([]byte, len(pa.info.UE))
 	mode := newECBDecrypter(block)
 	mode.CryptBlocks(ue, pa.info.UE)
@@ -369,6 +372,9 @@ func (pa *PasswordAuth) authenticateOwnerR5(password string) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(pa.info.OE)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid OE length: not full AES blocks")
+	}
 	oe := make([]byte, len(pa.info.OE))
 	mode := newECBDecrypter(block)
 	mode.CryptBlocks(oe, pa.info.OE)
@@ -399,6 +405,9 @@ func (pa *PasswordAuth) authenticateUserR6(password string) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(pa.info.UE)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid UE length: not full AES blocks")
+	}
 	ue := make([]byte, len(pa.info.UE))
 	mode := newECBDecrypter(block)
 	mode.CryptBlocks(ue, pa.info.UE)
@@ -430,6 +439,9 @@ func (pa *PasswordAuth) authenticateOwnerR6(password string) ([]byte, error) {
 		return nil, err
 	}
 
+	if len(pa.info.OE)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid OE length: not full AES blocks")
+	}
 	oe := make([]byte, len(pa.info.OE))
 	mode := newECBDecrypter(block)
 	mode.CryptBlocks(oe, pa.info.OE)
@@ -448,6 +460,9 @@ func (pa *PasswordAuth) ValidatePermissions(key []byte) error {
 		return err
 	}
 
+	if len(pa.info.Perms)%aes.BlockSize != 0 {
+		return fmt.Errorf("invalid Perms length: not full AES blocks")
+	}
 	perms := make([]byte, len(pa.info.Perms))
 	mode := newECBDecrypter(block)
 	mode.CryptBlocks(perms, pa.info.Perms)

@@ -2755,7 +2755,7 @@ func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
 	if useAES {
 		s := []byte(x)
 		if len(s) < aes.BlockSize {
-			// Encrypted text too short, return original
+			// Not enough data to contain IV; treat as plaintext
 			return x
 		}
 
@@ -2767,9 +2767,36 @@ func decryptString(key []byte, useAES bool, ptr objptr, x string) string {
 		iv := s[:aes.BlockSize]
 		s = s[aes.BlockSize:]
 
+		// CBC requires input to be full blocks; guard to avoid panic
+		if len(s)%aes.BlockSize != 0 {
+			// Ciphertext length invalid for CBC; leave as-is
+			return x
+		}
+
 		stream := cipher.NewCBCDecrypter(block, iv)
 		stream.CryptBlocks(s, s)
-		x = string(s)
+
+		// Remove PKCS#7 padding from decrypted data
+		if len(s) == 0 {
+			return ""
+		}
+		pad := int(s[len(s)-1])
+		if pad == 0 || pad > aes.BlockSize || pad > len(s) {
+			// Invalid padding; return original to avoid corrupt output
+			return x
+		}
+		// Verify padding bytes
+		valid := true
+		for i := 0; i < pad; i++ {
+			if s[len(s)-1-i] != byte(pad) {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			return x
+		}
+		x = string(s[:len(s)-pad])
 	} else {
 		c, _ := rc4.NewCipher(key)
 		data := []byte(x)
